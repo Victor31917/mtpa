@@ -1,0 +1,177 @@
+.incubadora-form-page {
+  min-height: 100vh;
+  padding: 30px;
+  background-color: #f5f7fa;
+}
+
+.incubadora-form-container {
+  width: 100%;
+  max-width: 700px;
+  margin: 0 auto;
+  padding: 30px;
+  background-color: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+}
+
+.incubadora-form-header {
+  margin-bottom: 25px;
+}
+
+.incubadora-form-header h1 {
+  margin: 0 0 8px;
+  color: #1f2937;
+  font-size: 28px;
+}
+
+.incubadora-form-header p {
+  margin: 0;
+  color: #6b7280;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.form-section {
+  margin-bottom: 30px;
+  padding: 22px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background-color: #fafafa;
+}
+
+.form-section h2 {
+  margin: 0 0 20px;
+  color: #374151;
+  font-size: 19px;
+}
+
+.section-description {
+  margin: -10px 0 20px;
+  color: #6b7280;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.form-group:last-child {
+  margin-bottom: 0;
+}
+
+.form-group label {
+  color: #374151;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.form-group label span {
+  color: #dc2626;
+}
+
+.form-group input,
+.form-group select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background-color: #ffffff;
+  color: #1f2937;
+  font-size: 15px;
+  outline: none;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
+}
+
+.form-group input:focus,
+.form-group select:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.form-group input:disabled,
+.form-group select:disabled {
+  background-color: #f3f4f6;
+  cursor: not-allowed;
+}
+
+.incubadora-form-error {
+  margin-bottom: 20px;
+  padding: 12px 15px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background-color: #fef2f2;
+  color: #b91c1c;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.incubadora-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.incubadora-form-actions button {
+  padding: 12px 20px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    opacity 0.2s,
+    transform 0.2s;
+}
+
+.incubadora-form-actions button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.incubadora-form-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-cancelar {
+  background-color: #e5e7eb;
+  color: #374151;
+}
+
+.btn-guardar {
+  background-color: #2563eb;
+  color: #ffffff;
+}
+
+@media (max-width: 600px) {
+  .incubadora-form-page {
+    padding: 15px;
+  }
+
+  .incubadora-form-container {
+    padding: 20px;
+  }
+
+  .incubadora-form-header h1 {
+    font-size: 24px;
+  }
+
+  .form-section {
+    padding: 18px;
+  }
+
+  .incubadora-form-actions {
+    flex-direction: column-reverse;
+  }
+
+  .incubadora-form-actions button {
+    width: 100%;
+  }
+}
