@@ -1,5 +1,7 @@
 import { Outlet } from "react-router-dom";
 
+import NotificationBanner from "../components/alerts/NotificationBanner";
+
 // =========================================================
 // M.T.P.A. - LAYOUT DE PÁGINAS PROTEGIDAS
 // Mejora Técnica de Producción Avícola
@@ -16,6 +18,7 @@ import { Outlet } from "react-router-dom";
 const DashboardLayout = () => {
   return (
     <div className="dashboard-layout">
+      <NotificationBanner />
       <Outlet />
     </div>
   );
