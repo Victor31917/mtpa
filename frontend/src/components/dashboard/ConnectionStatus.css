@@ -1,0 +1,144 @@
+css
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+
+  width: 100%;
+  padding: 1rem 1.25rem;
+
+  box-sizing: border-box;
+
+  border: 1px solid;
+  border-radius: 0.75rem;
+
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease;
+}
+
+/* ================================
+   CONECTADO
+================================ */
+
+.connection-status--connected {
+  background-color: #f0fdf4;
+  border-color: #86efac;
+}
+
+.connection-status--connected
+  .connection-status__indicator {
+  background-color: #22c55e;
+}
+
+.connection-status--connected
+  .connection-status__state {
+  color: #15803d;
+}
+
+/* ================================
+   DESCONECTADO
+================================ */
+
+.connection-status--disconnected {
+  background-color: #fef2f2;
+  border-color: #fca5a5;
+}
+
+.connection-status--disconnected
+  .connection-status__indicator {
+  background-color: #ef4444;
+}
+
+.connection-status--disconnected
+  .connection-status__state {
+  color: #b91c1c;
+}
+
+/* ================================
+   INDICADOR
+================================ */
+
+.connection-status__indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  flex-shrink: 0;
+
+  width: 2.5rem;
+  height: 2.5rem;
+
+  border-radius: 50%;
+
+  color: white;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+/* ================================
+   CONTENIDO
+================================ */
+
+.connection-status__content {
+  flex: 1;
+  min-width: 0;
+}
+
+.connection-status__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.connection-status__label {
+  color: var(--color-slate-600);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.connection-status__state {
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.connection-status__last-communication {
+  margin: 0.35rem 0 0;
+
+  color: var(--color-slate-500);
+  font-size: 0.85rem;
+}
+
+/* ================================
+   RESPONSIVE
+================================ */
+
+@media (max-width: 768px) {
+  .connection-status {
+    gap: 0.75rem;
+    padding: 0.875rem 1rem;
+  }
+
+  .connection-status__indicator {
+    width: 2.25rem;
+    height: 2.25rem;
+    font-size: 1rem;
+  }
+
+  .connection-status__header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .connection-status__label,
+  .connection-status__state {
+    font-size: 0.85rem;
+  }
+
+  .connection-status__last-communication {
+    font-size: 0.8rem;
+  }
+}
+
