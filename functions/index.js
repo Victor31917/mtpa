@@ -1000,3 +1000,139 @@ exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
   });
 });
 
+js
+/**
+ * Cloud Function trigger: notificarAlerta
+ *
+ * Se ejecuta automáticamente cuando se crea una nueva alerta:
+ *
+ * alertas/{alertaId}
+ *
+ * IMPORTANTE:
+ * - NO es callable.
+ * - NO es un endpoint HTTPS.
+ * - NO debe ser invocada desde el cliente web.
+ * - El cliente recibe la alerta in-app mediante su listener
+ *   en tiempo real sobre la colección "alertas".
+ *
+ * Esta función se encarga únicamente de preparar el envío
+ * de correo electrónico a los administradores activos.
+ */
+exports.notificarAlerta = functions.firestore
+  .document("alertas/{alertaId}")
+  .onCreate(async (snap, context) => {
+    const alerta = snap.data();
+
+    if (!alerta) {
+      console.warn(
+        `La alerta ${context.params.alertaId} no contiene datos.`
+      );
+
+      return null;
+    }
+
+    const db = admin.firestore();
+
+    // ---------------------------------------------------------
+    // 1. Buscar administradores activos
+    // ---------------------------------------------------------
+
+    const administradoresSnapshot = await db
+      .collection(COLECCION_USUARIOS)
+      .where("rol", "==", "administrador")
+      .where("activo", "==", true)
+      .get();
+
+    if (administradoresSnapshot.empty) {
+      console.log(
+        "No existen administradores activos para notificar."
+      );
+
+      return null;
+    }
+
+    // ---------------------------------------------------------
+    // 2. Obtener datos de la alerta
+    // ---------------------------------------------------------
+
+    const titulo =
+      alerta.titulo || "Nueva alerta de MindGame";
+
+    const mensaje =
+      alerta.mensaje ||
+      alerta.descripcion ||
+      alerta.texto ||
+      "Se ha generado una nueva alerta.";
+
+    // ---------------------------------------------------------
+    // 3. Preparar destinatarios
+    // ---------------------------------------------------------
+
+    const destinatarios = administradoresSnapshot.docs
+      .map((doc) => doc.data())
+      .map((usuario) => usuario.correo)
+      .filter(
+        (correo) =>
+          typeof correo === "string" &&
+          correo.trim().length > 0
+      );
+
+    if (destinatarios.length === 0) {
+      console.log(
+        "Los administradores activos no tienen correos válidos."
+      );
+
+      return null;
+    }
+
+    // ---------------------------------------------------------
+    // 4. Trigger Email de Firebase
+    // ---------------------------------------------------------
+    //
+    // La extensión "Trigger Email" utiliza una colección
+    // configurada para enviar correos.
+    //
+    // IMPORTANTE:
+    // Cambia "mail" por el nombre real de la colección que
+    // hayas configurado en la extensión.
+    //
+    // La función NO envía directamente el correo.
+    // Solo crea los documentos que procesará la extensión.
+    // ---------------------------------------------------------
+
+    const batch = db.batch();
+
+    destinatarios.forEach((correo) => {
+      const correoRef = db.collection("mail").doc();
+
+      batch.set(correoRef, {
+        to: correo,
+
+        message: {
+          subject: titulo,
+
+          text: mensaje,
+
+          html: `
+            <h2>${titulo}</h2>
+            <p>${mensaje}</p>
+            <p>
+              Se generó una nueva alerta en MindGame.
+            </p>
+          `,
+        },
+      });
+    });
+
+    await batch.commit();
+
+    console.log(
+      `Correo preparado para ${destinatarios.length} administrador(es).`,
+      {
+        alertaId: context.params.alertaId,
+      }
+    );
+
+    return null;
+  });
+
