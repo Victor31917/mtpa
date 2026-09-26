@@ -73,5 +73,83 @@ service cloud.firestore {
     match /{document=**} {
       allow read, write: if false;
     }
+
+
+
+    // =====================================================
+    // MEDICIONES
+    // =====================================================
+    //
+    // Las mediciones:
+    // - pueden ser leídas por cualquier usuario autenticado;
+    // - nunca pueden ser escritas directamente desde el cliente.
+    //
+    // procesarMedicion utiliza Admin SDK, por lo que sus
+    // escrituras no pasan por estas reglas.
+    //
+
+    match /mediciones/{id} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if false;
+    }
+
+    // =====================================================
+    // UMBRALES
+    // =====================================================
+    //
+    // Los usuarios autenticados pueden consultar los umbrales.
+    // Solo un administrador puede crearlos, modificarlos o
+    // eliminarlos.
+    //
+
+    match /umbrales/{id} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // =====================================================
+    // ALERTAS
+    // =====================================================
+    //
+    // Las alertas son creadas exclusivamente por
+    // procesarMedicion mediante Admin SDK.
+    //
+    // El cliente puede leerlas, pero no puede crearlas.
+    //
+    // Se permite actualizar únicamente el campo "estado".
+    // Esto permite, por ejemplo, que el cliente cambie una
+    // alerta de "nueva" a otro estado sin modificar el resto
+    // de sus datos.
+    //
+
+    match /alertas/{id} {
+      allow read: if request.auth != null;
+
+      allow create: if false;
+
+      allow update: if request.auth != null
+        && request.resource.data.diff(resource.data)
+          .affectedKeys()
+          .hasOnly(["estado"]);
+
+      allow delete: if false;
+    }
+
+    // =====================================================
+    // RESTO DE REGLAS DE SPRINT 2
+    // =====================================================
+    //
+    // Mantén aquí las reglas existentes para:
+    // usuarios, incubadoras y dispositivos.
+    //
+    // No es necesario agregar:
+    // estado_dispositivos
+    //
+    // El estado de conexión pertenece a:
+    // dispositivos/{id}
+    //
+    // Las escrituras de procesarMedicion mediante Admin SDK
+    // no pasan por estas reglas.
+    // =====================================================
   }
 }
