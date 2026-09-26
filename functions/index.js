@@ -540,3 +540,314 @@ exports.crearDispositivo = functions.https.onCall(async (data, context) => {
 
   return { id: referencia.id, identificadorMqtt };
 });
+
+js
+/**
+ * Cloud Function HTTPS: procesarMedicion
+ *
+ * Recibe mediciones exclusivamente desde el Servicio de Integración.
+ *
+ * IMPORTANTE:
+ * - NO es callable.
+ * - NO debe ser invocada desde el cliente web.
+ * - Utiliza autenticación servicio a servicio mediante Bearer Token.
+ *
+ * Datos esperados:
+ * {
+ *   incubadoraId: string,
+ *   dispositivoId: string,
+ *   variable: string,
+ *   valor: number,
+ *   unidad: string,
+ *   medidoEn: string | number | Timestamp serializado
+ * }
+ */
+exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
+  // ---------------------------------------------------------
+  // 1. Validar método HTTP
+  // ---------------------------------------------------------
+
+  if (req.method !== "POST") {
+    return res.status(405).json({
+      ok: false,
+      error: "Método no permitido. Utiliza POST.",
+    });
+  }
+
+  // ---------------------------------------------------------
+  // 2. Autenticación servicio a servicio
+  // ---------------------------------------------------------
+  //
+  // El Servicio de Integración debe enviar:
+  //
+  // Authorization: Bearer <TOKEN>
+  //
+  // El token debe configurarse como variable de entorno.
+  // ---------------------------------------------------------
+
+  const authorization = req.headers.authorization;
+
+  if (!authorization || !authorization.startsWith("Bearer ")) {
+    return res.status(401).json({
+      ok: false,
+      error: "No autorizado.",
+    });
+  }
+
+  const token = authorization.substring("Bearer ".length).trim();
+
+  if (!token) {
+    return res.status(401).json({
+      ok: false,
+      error: "Token de autenticación requerido.",
+    });
+  }
+
+  const expectedToken = process.env.INTEGRATION_SERVICE_TOKEN;
+
+  if (!expectedToken || token !== expectedToken) {
+    console.warn(
+      "Intento de acceso no autorizado a procesarMedicion."
+    );
+
+    return res.status(403).json({
+      ok: false,
+      error: "Credenciales inválidas.",
+    });
+  }
+
+  // ---------------------------------------------------------
+  // 3. Validar payload
+  // ---------------------------------------------------------
+
+  const {
+    incubadoraId,
+    dispositivoId,
+    variable,
+    valor,
+    unidad,
+    medidoEn,
+  } = req.body || {};
+
+  const camposFaltantes = [];
+
+  if (!incubadoraId) camposFaltantes.push("incubadoraId");
+  if (!dispositivoId) camposFaltantes.push("dispositivoId");
+  if (!variable) camposFaltantes.push("variable");
+
+  if (valor === undefined || valor === null) {
+    camposFaltantes.push("valor");
+  }
+
+  if (!unidad) camposFaltantes.push("unidad");
+  if (!medidoEn) camposFaltantes.push("medidoEn");
+
+  if (camposFaltantes.length > 0) {
+    return res.status(400).json({
+      ok: false,
+      error: "Payload inválido.",
+      camposFaltantes,
+    });
+  }
+
+  // ---------------------------------------------------------
+  // 4. Validar tipos
+  // ---------------------------------------------------------
+
+  if (typeof incubadoraId !== "string") {
+    return res.status(400).json({
+      ok: false,
+      error: "incubadoraId debe ser un string.",
+    });
+  }
+
+  if (typeof dispositivoId !== "string") {
+    return res.status(400).json({
+      ok: false,
+      error: "dispositivoId debe ser un string.",
+    });
+  }
+
+  if (typeof variable !== "string") {
+    return res.status(400).json({
+      ok: false,
+      error: "variable debe ser un string.",
+    });
+  }
+
+  if (typeof unidad !== "string") {
+    return res.status(400).json({
+      ok: false,
+      error: "unidad debe ser un string.",
+    });
+  }
+
+  if (typeof valor !== "number" || !Number.isFinite(valor)) {
+    return res.status(400).json({
+      ok: false,
+      error: "valor debe ser un número válido.",
+    });
+  }
+
+  // ---------------------------------------------------------
+  // 5. Validar y convertir medidoEn
+  // ---------------------------------------------------------
+
+  let medidoEnTimestamp;
+
+  if (
+    typeof medidoEn === "string" ||
+    typeof medidoEn === "number"
+  ) {
+    const fecha = new Date(medidoEn);
+
+    if (Number.isNaN(fecha.getTime())) {
+      return res.status(400).json({
+        ok: false,
+        error: "medidoEn no contiene una fecha válida.",
+      });
+    }
+
+    medidoEnTimestamp =
+      admin.firestore.Timestamp.fromDate(fecha);
+  } else if (
+    typeof medidoEn === "object" &&
+    medidoEn !== null &&
+    typeof medidoEn._seconds === "number"
+  ) {
+    medidoEnTimestamp = new admin.firestore.Timestamp(
+      medidoEn._seconds,
+      medidoEn._nanoseconds || 0
+    );
+  } else {
+    return res.status(400).json({
+      ok: false,
+      error:
+        "medidoEn debe ser una fecha válida o un Timestamp serializado.",
+    });
+  }
+
+  // ---------------------------------------------------------
+  // 6. Referencias Firestore
+  // ---------------------------------------------------------
+
+  const db = admin.firestore();
+
+  const dispositivoRef = db
+    .collection(COLECCION_DISPOSITIVOS)
+    .doc(dispositivoId);
+
+  const medicionRef = db
+    .collection("mediciones")
+    .doc();
+
+  // ---------------------------------------------------------
+  // 7. Verificar que exista el dispositivo
+  // ---------------------------------------------------------
+
+  const dispositivoSnapshot = await dispositivoRef.get();
+
+  if (!dispositivoSnapshot.exists) {
+    return res.status(404).json({
+      ok: false,
+      error: "El dispositivo no existe.",
+      dispositivoId,
+    });
+  }
+
+  const dispositivo = dispositivoSnapshot.data();
+
+  // ---------------------------------------------------------
+  // 8. Verificar relación dispositivo / incubadora
+  // ---------------------------------------------------------
+
+  if (
+    dispositivo.incubadoraId &&
+    dispositivo.incubadoraId !== incubadoraId
+  ) {
+    return res.status(400).json({
+      ok: false,
+      error:
+        "El dispositivo no pertenece a la incubadora indicada.",
+    });
+  }
+
+  // ---------------------------------------------------------
+  // 9. Persistir medición y actualizar dispositivo
+  // ---------------------------------------------------------
+
+  const ahora = admin.firestore.Timestamp.now();
+
+  const medicion = {
+    incubadoraId,
+    dispositivoId,
+    variable,
+    valor,
+    unidad,
+    medidoEn: medidoEnTimestamp,
+    creadoEn: ahora,
+  };
+
+  const batch = db.batch();
+
+  // Crear:
+  // mediciones/{medicionId}
+  batch.set(medicionRef, medicion);
+
+  // Actualizar directamente:
+  // dispositivos/{dispositivoId}
+  //
+  // NO se utiliza estado_dispositivos/.
+  batch.update(dispositivoRef, {
+    estadoConexion: "conectado",
+    ultimaComunicacionEn: ahora,
+  });
+
+  await batch.commit();
+
+  // ---------------------------------------------------------
+  // 10. Punto de entrada para evaluación de umbrales
+  // ---------------------------------------------------------
+
+  // TODO Sprint 3: comparar esta medición contra los
+  // umbrales configurados para la incubadora/dispositivo.
+  //
+  // Ejemplo futuro:
+  //
+  // await evaluarUmbrales({
+  //   incubadoraId,
+  //   dispositivoId,
+  //   variable,
+  //   valor,
+  //   unidad,
+  //   medidoEn: medidoEnTimestamp,
+  // });
+
+  // ---------------------------------------------------------
+  // 11. Automatización de ventiladores
+  // ---------------------------------------------------------
+
+  // TODO Sprint 4: evaluarAutomatizacion
+
+  // ---------------------------------------------------------
+  // 12. Respuesta
+  // ---------------------------------------------------------
+
+  console.log("Medición procesada correctamente.", {
+    medicionId: medicionRef.id,
+    incubadoraId,
+    dispositivoId,
+    variable,
+    valor,
+    unidad,
+  });
+
+  return res.status(201).json({
+    ok: true,
+    medicionId: medicionRef.id,
+    dispositivoId,
+    estadoConexion: "conectado",
+    ultimaComunicacionEn: ahora.toDate().toISOString(),
+  });
+});
+
