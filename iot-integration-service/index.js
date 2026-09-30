@@ -1,3 +1,4 @@
+
 "use strict";
 
 // =========================================================
@@ -5,31 +6,42 @@
 // Mejora Técnica de Producción Avícola
 // =========================================================
 //
-// Traduce los mensajes MQTT publicados por los dispositivos
-// físicos de cada incubadora. Por ahora (Sprint 2) solo se
-// conecta al broker, se suscribe a los tópicos relevantes y
-// loguea cada mensaje recibido; la escritura real en Firestore
-// ("procesarMedicion") se implementa en Sprint 3.
+// Servicio encargado de:
 //
-// Este módulo expone "conectar(onMensaje)" en vez de conectarse
-// directamente al importarse, para que Sprint 3 pueda reutilizar
-// la misma conexión/suscripción con su propio handler de
-// mensajes (el que sí escriba en Firestore), sin duplicar esta
-// lógica. Ejecutado directamente (`node index.js` / `npm start`),
-// se conecta con el handler por defecto, que solo loguea.
+// 1. Conectarse al broker MQTT.
+// 2. Escuchar mediciones, estados y latidos.
+// 3. Escuchar órdenes pendientes de Firestore.
+// 4. Publicar las órdenes de ventiladores mediante MQTT.
 //
-// Ver docs/contrato-mqtt.md para la convención de tópicos y
-// docs/broker-mqtt.md para los datos del cluster de HiveMQ Cloud.
+// La conexión MQTT y el listener de Firestore son
+// responsabilidades separadas.
 // =========================================================
 
 const path = require("path");
+const admin = require("firebase-admin");
+
 const { cargarVariablesDeEntorno } = require("./lib/env");
 const { conectarCliente } = require("./lib/mqtt-client");
 
 cargarVariablesDeEntorno(path.join(__dirname, ".env"));
 
 // =========================================================
-// Configuración desde variables de entorno (ver .env.example)
+// Firebase Admin SDK
+// =========================================================
+//
+// El Servicio de Integración utiliza Admin SDK para acceder
+// a Firestore sin depender de las reglas del cliente.
+//
+// =========================================================
+
+if (!admin.apps.length) {
+  admin.initializeApp();
+}
+
+const db = admin.firestore();
+
+// =========================================================
+// Configuración MQTT
 // =========================================================
 
 const MQTT_HOST = process.env.MQTT_HOST;
@@ -39,33 +51,44 @@ const MQTT_PASSWORD = process.env.MQTT_PASSWORD;
 const MQTT_TOPIC_PREFIX = process.env.MQTT_TOPIC_PREFIX || "mtpa-dev";
 
 // =========================================================
-// Tópicos a suscribir (ver docs/contrato-mqtt.md)
+// Tópicos a suscribir
 // =========================================================
 
-const TOPICO_MEDICIONES = `${MQTT_TOPIC_PREFIX}/+/sensores/+/medicion`;
-const TOPICO_ESTADO_VENTILADORES = `${MQTT_TOPIC_PREFIX}/+/ventiladores/+/estado`;
-const TOPICO_LATIDO = `${MQTT_TOPIC_PREFIX}/+/dispositivos/+/latido`;
+const TOPICO_MEDICIONES =
+  `${MQTT_TOPIC_PREFIX}/+/sensores/+/medicion`;
 
-/**
- * Handler de mensajes por defecto: solo loguea el tópico y el
- * payload ya parseado. La invocación real a "procesarMedicion"
- * (escritura en Firestore, cálculo de estadoConexion, disparo de
- * alertas, etc.) es de Sprint 3 y queda deliberadamente fuera de
- * este bloque; Sprint 3 puede pasarle a "conectar()" su propio
- * handler en vez de este.
- *
- * @param {string} topico
- * @param {Object} payload
- */
+const TOPICO_ESTADO_VENTILADORES =
+  `${MQTT_TOPIC_PREFIX}/+/ventiladores/+/estado`;
+
+const TOPICO_LATIDO =
+  `${MQTT_TOPIC_PREFIX}/+/dispositivos/+/latido`;
+
+// =========================================================
+// Handler de mensajes por defecto
+// =========================================================
+
 function manejarMensajePorDefecto(topico, payload) {
-  console.log(`[iot-integration-service] Mensaje en "${topico}":`, payload);
+  console.log(
+    `[iot-integration-service] Mensaje en "${topico}":`,
+    payload
+  );
 }
 
+// =========================================================
+// CONEXIÓN MQTT
+// =========================================================
+//
+// Esta función se ocupa únicamente de:
+//
+// - conectar al broker
+// - suscribirse a tópicos
+// - recibir mensajes
+//
+// NO contiene lógica de Firestore.
+//
+// =========================================================
+
 /**
- * Conecta al broker MQTT, se suscribe a los tópicos relevantes y
- * delega cada mensaje entrante (ya parseado como JSON) a
- * "onMensaje".
- *
  * @param {(topico: string, payload: Object) => void} [onMensaje]
  * @returns {import("mqtt").MqttClient}
  */
@@ -74,9 +97,9 @@ function conectar(onMensaje = manejarMensajePorDefecto) {
     console.error(
       "[iot-integration-service] Faltan variables de entorno obligatorias " +
         "(MQTT_HOST, MQTT_USERNAME, MQTT_PASSWORD). Copiá .env.example a " +
-        ".env y completalo con las credenciales del cluster (ver " +
-        "docs/broker-mqtt.md)."
+        ".env y completalo con las credenciales del cluster."
     );
+
     process.exit(1);
   }
 
@@ -94,7 +117,11 @@ function conectar(onMensaje = manejarMensajePorDefecto) {
     );
 
     cliente.subscribe(
-      [TOPICO_MEDICIONES, TOPICO_ESTADO_VENTILADORES, TOPICO_LATIDO],
+      [
+        TOPICO_MEDICIONES,
+        TOPICO_ESTADO_VENTILADORES,
+        TOPICO_LATIDO,
+      ],
       (error) => {
         if (error) {
           console.error(
@@ -105,19 +132,25 @@ function conectar(onMensaje = manejarMensajePorDefecto) {
         }
 
         console.log(
-          `[iot-integration-service] Suscripto a "${TOPICO_MEDICIONES}", ` +
-            `"${TOPICO_ESTADO_VENTILADORES}" y "${TOPICO_LATIDO}"`
+          `[iot-integration-service] Suscripto a ` +
+            `"${TOPICO_MEDICIONES}", ` +
+            `"${TOPICO_ESTADO_VENTILADORES}" y ` +
+            `"${TOPICO_LATIDO}"`
         );
       }
     );
   });
 
   cliente.on("reconnect", () => {
-    console.warn("[iot-integration-service] Reconectando al broker MQTT...");
+    console.warn(
+      "[iot-integration-service] Reconectando al broker MQTT..."
+    );
   });
 
   cliente.on("close", () => {
-    console.warn("[iot-integration-service] Conexión con el broker cerrada.");
+    console.warn(
+      "[iot-integration-service] Conexión con el broker cerrada."
+    );
   });
 
   cliente.on("error", (error) => {
@@ -136,8 +169,8 @@ function conectar(onMensaje = manejarMensajePorDefecto) {
       payload = JSON.parse(payloadCrudo);
     } catch (error) {
       console.warn(
-        `[iot-integration-service] Mensaje en "${topico}" no es JSON ` +
-          "válido, se loguea en crudo:",
+        `[iot-integration-service] Mensaje en "${topico}" ` +
+          "no es JSON válido, se loguea en crudo:",
         payloadCrudo
       );
       return;
@@ -150,24 +183,231 @@ function conectar(onMensaje = manejarMensajePorDefecto) {
 }
 
 // =========================================================
-// Ejecución directa (`node index.js` / `npm start`)
+// LISTENER DE ÓRDENES DE VENTILADOR
 // =========================================================
 //
-// Si este archivo se importa (por ejemplo, desde Sprint 3, para
-// reutilizar "conectar()" con otro handler), no se conecta solo
-// ni engancha señales de proceso: eso queda a cargo de quien lo
-// importe.
+// Esta función es independiente de conectar().
+//
+// Escucha:
+//
+//   ordenes_ventilador
+//
+// solamente cuando:
+//
+//   estado == "pendiente"
+//
+// Por cada orden nueva:
+//
+//   1. Obtiene los datos.
+//   2. Construye el tópico MQTT.
+//   3. Publica el comando.
+//   4. Actualiza la orden a "enviada".
+//
+// =========================================================
+
+function escucharOrdenesPendientes(cliente) {
+  if (!cliente) {
+    throw new Error(
+      "Se necesita un cliente MQTT para escuchar órdenes pendientes."
+    );
+  }
+
+  console.log(
+    "[iot-integration-service] Iniciando listener de " +
+      "ordenes_ventilador..."
+  );
+
+  const consulta = db
+    .collection("ordenes_ventilador")
+    .where("estado", "==", "pendiente");
+
+  return consulta.onSnapshot(
+    (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        // Solo procesamos documentos que aparecen como nuevos.
+        if (change.type !== "added") {
+          return;
+        }
+
+        procesarOrdenPendiente(change.doc, cliente);
+      });
+    },
+    (error) => {
+      console.error(
+        "[iot-integration-service] Error escuchando " +
+          "ordenes_ventilador:",
+        error
+      );
+    }
+  );
+}
+
+// =========================================================
+// PROCESAR UNA ORDEN PENDIENTE
+// =========================================================
+
+async function procesarOrdenPendiente(ordenDoc, cliente) {
+  const ordenId = ordenDoc.id;
+  const orden = ordenDoc.data();
+
+  try {
+    // -------------------------------------------------------
+    // Validar datos necesarios
+    // -------------------------------------------------------
+
+    if (!orden.incubadoraId) {
+      console.error(
+        `[iot-integration-service] La orden ${ordenId} ` +
+          "no tiene incubadoraId."
+      );
+      return;
+    }
+
+    if (!orden.dispositivoId) {
+      console.error(
+        `[iot-integration-service] La orden ${ordenId} ` +
+          "no tiene dispositivoId."
+      );
+      return;
+    }
+
+    if (!orden.accionSolicitada) {
+      console.error(
+        `[iot-integration-service] La orden ${ordenId} ` +
+          "no tiene accionSolicitada."
+      );
+      return;
+    }
+
+    // -------------------------------------------------------
+    // Verificar conexión MQTT
+    // -------------------------------------------------------
+
+    if (!cliente.connected) {
+      console.warn(
+        `[iot-integration-service] MQTT no está conectado. ` +
+          `La orden ${ordenId} permanece pendiente.`
+      );
+      return;
+    }
+
+    // -------------------------------------------------------
+    // Construir tópico MQTT
+    // -------------------------------------------------------
+
+    const topico =
+      `${MQTT_TOPIC_PREFIX}/` +
+      `${orden.incubadoraId}/` +
+      `ventiladores/` +
+      `${orden.dispositivoId}/` +
+      `comando`;
+
+    // -------------------------------------------------------
+    // Construir payload
+    // -------------------------------------------------------
+
+    const payload = JSON.stringify({
+      accionSolicitada: orden.accionSolicitada,
+    });
+
+    // -------------------------------------------------------
+    // Publicar comando
+    // -------------------------------------------------------
+
+    await publicarMensaje(cliente, topico, payload);
+
+    console.log(
+      `[iot-integration-service] Orden ${ordenId} publicada ` +
+        `en "${topico}".`
+    );
+
+    // -------------------------------------------------------
+    // Actualizar estado
+    // -------------------------------------------------------
+
+    await ordenDoc.ref.update({
+      estado: "enviada",
+    });
+
+    console.log(
+      `[iot-integration-service] Orden ${ordenId} actualizada ` +
+        'a estado "enviada".'
+    );
+  } catch (error) {
+    console.error(
+      `[iot-integration-service] Error procesando ` +
+        `orden ${ordenId}:`,
+      error
+    );
+  }
+}
+
+// =========================================================
+// PUBLICAR MENSAJE MQTT
+// =========================================================
+
+function publicarMensaje(cliente, topico, payload) {
+  return new Promise((resolve, reject) => {
+    cliente.publish(
+      topico,
+      payload,
+      { qos: 1 },
+      (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      }
+    );
+  });
+}
+
+// =========================================================
+// EJECUCIÓN DIRECTA
+// =========================================================
+//
+// Si index.js se ejecuta directamente:
+//
+//   node index.js
+//
+// se inicia:
+//
+//   1. conexión MQTT
+//   2. listener de Firestore
+//
+// =========================================================
 
 if (require.main === module) {
   const cliente = conectar();
 
+  const unsubscribeOrdenes = escucharOrdenesPendientes(cliente);
+
   function cerrar() {
-    console.log("[iot-integration-service] Cerrando conexión MQTT...");
-    cliente.end(false, () => process.exit(0));
+    console.log(
+      "[iot-integration-service] Cerrando servicio..."
+    );
+
+    // Detener listener de Firestore.
+    unsubscribeOrdenes();
+
+    // Cerrar MQTT.
+    cliente.end(false, () => {
+      process.exit(0);
+    });
   }
 
   process.on("SIGINT", cerrar);
   process.on("SIGTERM", cerrar);
 }
 
-module.exports = { conectar };
+// =========================================================
+// EXPORTS
+// =========================================================
+
+module.exports = {
+  conectar,
+  escucharOrdenesPendientes,
+};
+
