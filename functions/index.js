@@ -1185,3 +1185,133 @@ exports.notificarAlerta = functions.firestore
     return null;
   });
 
+javascript
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const admin = require("firebase-admin");
+
+// Si admin.initializeApp() ya existe en tu archivo,
+// NO lo vuelvas a agregar.
+if (!admin.apps.length) {
+  admin.initializeApp();
+}
+
+const db = admin.firestore();
+
+// ============================================================
+// ENVIAR COMANDO AL VENTILADOR
+// ============================================================
+//
+// Permite a administradores y operadores autorizados enviar
+// manualmente una orden para encender o apagar un ventilador.
+//
+// La orden NO modifica directamente el ventilador.
+// Se crea en "ordenes_ventilador" con estado "pendiente".
+// El Servicio de Integración será quien ejecute posteriormente
+// la orden.
+//
+// ============================================================
+
+exports.enviarComandoVentilador = onCall(async (request) => {
+  // ----------------------------------------------------------
+  // 1. Autorización
+  // ----------------------------------------------------------
+  //
+  // requireRole ya existe desde Sprint 2.
+  // Permite únicamente:
+  //   - administrador
+  //   - operador
+  //
+  requireRole(request, ["administrador", "operador"]);
+
+  // ----------------------------------------------------------
+  // 2. Validar datos recibidos
+  // ----------------------------------------------------------
+
+  const { ventiladorId, accionSolicitada } = request.data || {};
+
+  if (!ventiladorId || typeof ventiladorId !== "string") {
+    throw new HttpsError(
+      "invalid-argument",
+      "El ventiladorId es obligatorio."
+    );
+  }
+
+  if (!["encender", "apagar"].includes(accionSolicitada)) {
+    throw new HttpsError(
+      "invalid-argument",
+      'accionSolicitada debe ser "encender" o "apagar".'
+    );
+  }
+
+  // ----------------------------------------------------------
+  // 3. Verificar que el ventilador exista
+  // ----------------------------------------------------------
+
+  const ventiladorRef = db
+    .collection("ventiladores")
+    .doc(ventiladorId);
+
+  const ventiladorSnap = await ventiladorRef.get();
+
+  if (!ventiladorSnap.exists) {
+    throw new HttpsError(
+      "not-found",
+      "El ventilador solicitado no existe."
+    );
+  }
+
+  const ventilador = ventiladorSnap.data();
+
+  // ----------------------------------------------------------
+  // 4. Validar modo de control
+  // ----------------------------------------------------------
+  //
+  // Se permite control manual cuando el modo es:
+  //   - manual
+  //   - mixto
+  //
+  // En modo automático el cliente no puede enviar órdenes
+  // manuales.
+  //
+
+  if (
+    ventilador.modoControl !== "manual" &&
+    ventilador.modoControl !== "mixto"
+  ) {
+    if (ventilador.modoControl === "automatico") {
+      throw new HttpsError(
+        "failed-precondition",
+        "El ventilador está configurado en modo automático y no admite comandos manuales."
+      );
+    }
+
+    throw new HttpsError(
+      "failed-precondition",
+      "El modo de control del ventilador no permite comandos manuales."
+    );
+  }
+
+  // ----------------------------------------------------------
+  // 5. Crear la orden
+  // ----------------------------------------------------------
+
+  const ordenRef = await db.collection("ordenes_ventilador").add({
+    ventiladorId,
+    accionSolicitada,
+    origen: "manual",
+    estado: "pendiente",
+    solicitadoPor: request.auth.uid,
+    creadaEn: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  // ----------------------------------------------------------
+  // 6. Respuesta
+  // ----------------------------------------------------------
+
+  return {
+    ok: true,
+    ordenId: ordenRef.id,
+    mensaje: "Orden de ventilador creada correctamente.",
+  };
+});
+
