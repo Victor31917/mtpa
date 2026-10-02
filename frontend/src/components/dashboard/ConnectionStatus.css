@@ -1,0 +1,58 @@
+.estado-conexion-card {
+  background-color: var(--color-white);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: var(--shadow-card);
+  border: 2px solid transparent;
+}
+
+.estado-conexion-card--conectado {
+  border-color: var(--color-success);
+}
+
+.estado-conexion-card--desconectado {
+  border-color: var(--color-danger);
+}
+
+.estado-conexion-card__header h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.estado-conexion-card__estado {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 20px 0;
+}
+
+.estado-conexion-card__icono {
+  font-size: 20px;
+}
+
+.estado-conexion-card--conectado
+  .estado-conexion-card__icono {
+  color: var(--color-success);
+}
+
+.estado-conexion-card--desconectado
+  .estado-conexion-card__icono {
+  color: var(--color-danger);
+}
+
+.estado-conexion-card__texto {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.estado-conexion-card__comunicacion {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 14px;
+  color: var(--color-text-secondary);
+}
+
+.estado-conexion-card__comunicacion strong {
+  color: var(--color-text);
+}
