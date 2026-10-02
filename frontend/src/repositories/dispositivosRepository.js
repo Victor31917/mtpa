@@ -124,3 +124,31 @@ export default {
   suscribirseADispositivosPorIncubadora,
   crearDispositivo,
 };
+
+export const suscribirseaDispositivosPorIncubadora = (
+  incubadoraId,
+  onCambio,
+  onError
+) => {
+  if (!incubadoraId) {
+    return () => {};
+  }
+
+  const referencia = query(
+    collection(db, COLLECTIONS.DEVICES),
+    where("incubadoraId", "==", incubadoraId)
+  );
+
+  return onSnapshot(
+    referencia,
+    (snapshot) => {
+      const dispositivos = snapshot.docs.map((documento) => ({
+        id: documento.id,
+        ...documento.data(),
+      }));
+
+      onCambio(dispositivos);
+    },
+    onError
+  );
+};
