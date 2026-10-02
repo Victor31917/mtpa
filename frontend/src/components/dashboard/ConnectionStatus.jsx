@@ -1,77 +1,113 @@
-import React from "react";
-import "./EstadoConexionCard.css";
+import { useEffect, useState } from "react";
+import "./ConnectionStatus.css";
 
-const EstadoConexionCard = ({
-  estadoConexion,
-  ultimaComunicacionEn,
-}) => {
-  const conectado = estadoConexion === "conectado";
+function calcularTiempoTranscurrido(fecha) {
+  if (!fecha) {
+    return "Sin información";
+  }
 
-  const calcularTiempoTranscurrido = (fecha) => {
-    if (!fecha) return "Sin comunicación registrada";
+  let fechaComunicacion;
 
-    const fechaComunicacion = new Date(fecha);
+  // Soporta Date, timestamp de Firestore y fechas en formato string.
+  if (fecha instanceof Date) {
+    fechaComunicacion = fecha;
+  } else if (typeof fecha?.toDate === "function") {
+    fechaComunicacion = fecha.toDate();
+  } else {
+    fechaComunicacion = new Date(fecha);
+  }
 
-    if (Number.isNaN(fechaComunicacion.getTime())) {
-      return "Fecha no disponible";
-    }
+  if (Number.isNaN(fechaComunicacion.getTime())) {
+    return "Fecha no disponible";
+  }
 
-    const ahora = new Date();
-    const diferencia = Math.max(
-      0,
-      ahora.getTime() - fechaComunicacion.getTime()
+  const ahora = new Date();
+  const diferenciaMs = Math.max(
+    0,
+    ahora.getTime() - fechaComunicacion.getTime()
+  );
+
+  const segundos = Math.floor(diferenciaMs / 1000);
+  const minutos = Math.floor(segundos / 60);
+  const horas = Math.floor(minutos / 60);
+  const dias = Math.floor(horas / 24);
+
+  if (segundos < 60) {
+    return "hace unos segundos";
+  }
+
+  if (minutos < 60) {
+    return `hace ${minutos} ${minutos === 1 ? "minuto" : "minutos"}`;
+  }
+
+  if (horas < 24) {
+    return `hace ${horas} ${horas === 1 ? "hora" : "horas"}`;
+  }
+
+  return `hace ${dias} ${dias === 1 ? "día" : "días"}`;
+}
+
+function ConnectionStatus({
+  estadoConexion = "desconectado",
+  ultimaComunicacionEn = null,
+}) {
+  const [tiempoTranscurrido, setTiempoTranscurrido] = useState(() =>
+    calcularTiempoTranscurrido(ultimaComunicacionEn)
+  );
+
+  useEffect(() => {
+    setTiempoTranscurrido(
+      calcularTiempoTranscurrido(ultimaComunicacionEn)
     );
 
-    const segundos = Math.floor(diferencia / 1000);
-    const minutos = Math.floor(segundos / 60);
-    const horas = Math.floor(minutos / 60);
-    const dias = Math.floor(horas / 24);
+    // Actualiza el texto cada minuto.
+    const interval = setInterval(() => {
+      setTiempoTranscurrido(
+        calcularTiempoTranscurrido(ultimaComunicacionEn)
+      );
+    }, 60 * 1000);
 
-    if (dias > 0) {
-      return `Hace ${dias} ${dias === 1 ? "día" : "días"}`;
-    }
+    return () => clearInterval(interval);
+  }, [ultimaComunicacionEn]);
 
-    if (horas > 0) {
-      return `Hace ${horas} ${horas === 1 ? "hora" : "horas"}`;
-    }
-
-    if (minutos > 0) {
-      return `Hace ${minutos} ${minutos === 1 ? "minuto" : "minutos"}`;
-    }
-
-    return "Hace unos segundos";
-  };
+  const conectado = estadoConexion === "conectado";
 
   return (
-    <div
-      className={`estado-conexion-card ${
+    <section
+      className={`connection-status ${
         conectado
-          ? "estado-conexion-card--conectado"
-          : "estado-conexion-card--desconectado"
+          ? "connection-status--connected"
+          : "connection-status--disconnected"
+      }`}
+      aria-label={`Estado de conexión: ${
+        conectado ? "conectado" : "desconectado"
       }`}
     >
-      <div className="estado-conexion-card__header">
-        <h3>Estado de conexión</h3>
+      <div
+        className="connection-status__indicator"
+        aria-hidden="true"
+      >
+        {conectado ? "✓" : "!"}
       </div>
 
-      <div className="estado-conexion-card__estado">
-        <span className="estado-conexion-card__icono" aria-hidden="true">
-          {conectado ? "●" : "●"}
-        </span>
+      <div className="connection-status__content">
+        <div className="connection-status__header">
+          <span className="connection-status__label">
+            Estado de conexión
+          </span>
 
-        <span className="estado-conexion-card__texto">
-          {conectado ? "Conectado" : "Desconectado"}
-        </span>
-      </div>
+          <span className="connection-status__state">
+            {conectado ? "Conectado" : "Desconectado"}
+          </span>
+        </div>
 
-      <div className="estado-conexion-card__comunicacion">
-        <span>Última comunicación:</span>
-        <strong>
-          {calcularTiempoTranscurrido(ultimaComunicacionEn)}
-        </strong>
+        <p className="connection-status__last-communication">
+          Última comunicación: {tiempoTranscurrido}
+        </p>
       </div>
-    </div>
+    </section>
   );
-};
+}
 
-export default EstadoConexionCard;
+export default ConnectionStatus;
+
