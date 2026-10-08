@@ -20,6 +20,11 @@ const COLECCION_USUARIOS = "usuarios";
 const COLECCION_INCUBADORAS = "incubadoras";
 const COLECCION_DISPOSITIVOS = "dispositivos";
 
+// Variables ambientales que acepta procesarMedicion. Deben coincidir
+// con ENVIRONMENTAL_VARIABLES de frontend/src/utils/constants.js (ver
+// docs/contrato-mqtt.md: el sensor publica temperatura y/o humedad).
+const VARIABLES_MEDICION_VALIDAS = ["temperatura", "humedad"];
+
 // =========================================================
 // ESTADOS Y TIPOS VÁLIDOS (Sprint 2 — incubadoras/dispositivos)
 //
@@ -690,6 +695,17 @@ exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
     return res.status(400).json({
       ok: false,
       error: "variable debe ser un string.",
+    });
+  }
+
+  if (!VARIABLES_MEDICION_VALIDAS.includes(variable)) {
+    return res.status(400).json({
+      ok: false,
+      error:
+        `La variable "${variable}" no es válida. Las variables permitidas ` +
+        "son: " +
+        VARIABLES_MEDICION_VALIDAS.join(", ") +
+        ".",
     });
   }
 
