@@ -315,11 +315,16 @@ async function invocarProcesarMedicion(medicion) {
         respuesta.status !== 408 &&
         respuesta.status !== 429
       ) {
+        error.permanente = true;
         throw error;
       }
 
       ultimoError = error;
     } catch (error) {
+      if (error.permanente) {
+        throw error;
+      }
+
       ultimoError = error;
     }
 
