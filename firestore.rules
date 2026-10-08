@@ -148,6 +148,52 @@ service cloud.firestore {
 
       allow delete: if false;
     }
-    // ============================================================ // Función para verificar si el usuario autenticado es admin // ============================================================ // Si isAdmin() YA EXISTE en tu archivo actual desde Sprint 2, // NO dupliques esta función. Conserva la versión existente. // // function isAdmin() { // return request.auth != null // && request.auth.token.rol == 'administrador'; // } // ============================================================ // VENTILADORES // ============================================================ // Los usuarios autenticados pueden consultar los ventiladores. // Ningún cliente puede crearlos, modificarlos ni eliminarlos. // El estadoActual será actualizado únicamente mediante // el Servicio de Integración utilizando Admin SDK. // match /ventiladores/{id} { allow read: if request.auth != null; allow write: if false; } // ============================================================ // REGLAS DE AUTOMATIZACIÓN // ============================================================ // Los usuarios autenticados pueden consultar las reglas. // Solamente los administradores pueden crearlas, modificarlas // o eliminarlas. // match /reglas_automatizacion/{id} { allow read: if request.auth != null; allow write: if isAdmin(); } // ============================================================ // ÓRDENES DE VENTILADOR // ============================================================ // Los usuarios autenticados pueden consultar las órdenes. // // La creación se realiza exclusivamente mediante: // - enviarComandoVentilador // - evaluación automática de procesarMedicion // // La actualización del estado de una orden la realiza // exclusivamente el Servicio de Integración mediante Admin SDK. // match /ordenes_ventilador/{id} { allow read: if request.auth != null; allow create: if false; allow update: if false; allow delete: if false; }
+
+    // =====================================================
+    // VENTILADORES
+    // =====================================================
+    //
+    // Los usuarios autenticados pueden consultar los
+    // ventiladores. Ningún cliente puede crearlos,
+    // modificarlos ni eliminarlos: el estado (estadoActual)
+    // lo escribe el Servicio de Integración o una Cloud
+    // Function mediante Admin SDK, que no pasa por estas
+    // reglas.
+    //
+
+    match /ventiladores/{id} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // =====================================================
+    // REGLAS DE AUTOMATIZACIÓN
+    // =====================================================
+    //
+    // Los usuarios autenticados pueden consultar las reglas.
+    // La escritura es siempre a través de la Cloud Function
+    // "guardarReglaAutomatizacion", que valida la banda de
+    // histéresis; nunca por escritura directa del cliente.
+    //
+
+    match /reglas_automatizacion/{id} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // =====================================================
+    // ÓRDENES DE VENTILADOR
+    // =====================================================
+    //
+    // Los usuarios autenticados pueden consultar las órdenes.
+    // Se crean únicamente desde la Cloud Function
+    // "enviarComandoVentilador" y su estado lo actualiza el
+    // Servicio de Integración, ambos con Admin SDK.
+    //
+
+    match /ordenes_ventilador/{id} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if false;
+    }
   }
 }
