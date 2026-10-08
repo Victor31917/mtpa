@@ -56,6 +56,17 @@ Esa misma constante (`ultimaComunicacionEn` en el modelo de datos, ver
 es la que el servicio usa para calcular si el umbral de 30 segundos fue
 superado.
 
+Tanto los latidos como las mediciones válidas cuentan como señal de vida del
+dispositivo. Para no agotar la cuota de Firestore, el servicio no escribe en
+cada mensaje: solo al marcar `"conectado"`, al refrescar
+`ultimaComunicacionEn` (como máximo una vez por minuto) y al marcar
+`"desconectado"`. Los umbrales se ajustan con `LATIDO_TIMEOUT_SEGUNDOS`,
+`LATIDO_REVISION_SEGUNDOS` y `LATIDO_REFRESCO_SEGUNDOS` (ver
+`iot-integration-service/.env.example`). La detección corre dentro del Servicio
+de Integración IoT, por lo que debe estar en ejecución para que funcione: si el
+servicio está caído, nadie marca a los dispositivos como desconectados. Los
+dispositivos que no existen en `dispositivos/` se ignoran (no se crean).
+
 ## Notas
 
 - El payload del comando de ventilador está definido arriba. El payload
