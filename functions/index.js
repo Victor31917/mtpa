@@ -541,7 +541,6 @@ exports.crearDispositivo = functions.https.onCall(async (data, context) => {
   return { id: referencia.id, identificadorMqtt };
 });
 
-js
 /**
  * Cloud Function HTTPS: procesarMedicion
  *
