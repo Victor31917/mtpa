@@ -2,18 +2,35 @@ import { useEffect, useMemo, useState } from "react";
 
 import useAuth from "../../hooks/useAuth";
 
+import alertasRepository from "../../repositories/alertasRepository";
 import incubadorasRepository from "../../repositories/incubadorasRepository";
 import medicionesRepository from "../../repositories/medicionesRepository";
 import dispositivosRepository from "../../repositories/dispositivosRepository";
+import umbralesRepository from "../../repositories/umbralesRepository";
 
 import ConnectionStatus from "../../components/dashboard/ConnectionStatus";
 import FanStatusCard from "../../components/dashboard/FanStatusCard";
 import GeneralStatusCard from "../../components/dashboard/GeneralStatusCard";
 import HumidityCard from "../../components/dashboard/HumidityCard";
 import LastUpdateCard from "../../components/dashboard/LastUpdateCard";
+import QuickSummary from "../../components/dashboard/QuickSummary";
 import TemperatureCard from "../../components/dashboard/TemperatureCard";
 
+import { ALERT_STATUS } from "../../utils/constants";
+import { calcularEstadoGeneral } from "../../utils/estadoGeneral";
+
 import "./Dashboard.css";
+
+// Alertas activas leídas para el estado general. alertasRepository aplica
+// el límite ANTES de filtrar por estado: una alerta activa que no esté
+// entre las últimas LIMITE_ALERTAS_ACTIVAS alertas (de cualquier estado)
+// no se cuenta.
+const LIMITE_ALERTAS_ACTIVAS = 200;
+
+// Umbral configurado ({ minimo, maximo }) al formato { min, max } que
+// esperan TemperatureCard y HumidityCard; sin umbral no se resalta nada.
+const aUmbralDeTarjeta = (umbral) =>
+  umbral ? { min: umbral.minimo, max: umbral.maximo } : undefined;
 
 const toMillis = (value) => {
   if (!value) return 0;
@@ -52,6 +69,12 @@ const Dashboard = () => {
 
   const [mediciones, setMediciones] = useState([]);
   const [dispositivos, setDispositivos] = useState([]);
+  const [umbrales, setUmbrales] = useState(null);
+
+  // Alertas activas y dispositivos de TODAS las incubadoras (null hasta
+  // que llega el primer dato): alimentan el estado general y el resumen.
+  const [alertasActivas, setAlertasActivas] = useState(null);
+  const [todosDispositivos, setTodosDispositivos] = useState(null);
 
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState("");
@@ -119,9 +142,54 @@ const Dashboard = () => {
   const cambiarIncubadora = (nuevaIncubadoraId) => {
     setMediciones([]);
     setDispositivos([]);
+    setUmbrales(null);
     setError("");
     setIncubadoraId(nuevaIncubadoraId);
   };
+
+  /*
+   * =========================================================
+   * SUSCRIPCIONES GLOBALES (TODAS LAS INCUBADORAS)
+   * =========================================================
+   *
+   * Una sola suscripción a las alertas activas y otra a todos los
+   * dispositivos (se asumen pocos): de ahí sale el estado general de
+   * cada incubadora. Se cancelan ambas al desmontar el Dashboard.
+   */
+
+  useEffect(() => {
+    const unsubscribeAlertas = alertasRepository.suscribirseAlertas(
+      { estado: ALERT_STATUS.ACTIVE, limite: LIMITE_ALERTAS_ACTIVAS },
+      (alertas) => {
+        setAlertasActivas(alertas);
+      },
+      (err) => {
+        console.error("Error en la suscripción de alertas:", err);
+
+        setError("No fue posible actualizar las alertas en tiempo real.");
+      }
+    );
+
+    const unsubscribeTodosDispositivos =
+      dispositivosRepository.suscribirseATodosLosDispositivos(
+        (todos) => {
+          setTodosDispositivos(todos);
+        },
+        (err) => {
+          console.error(
+            "Error en la suscripción de todos los dispositivos:",
+            err
+          );
+
+          setError("No fue posible actualizar el resumen de incubadoras.");
+        }
+      );
+
+    return () => {
+      unsubscribeAlertas();
+      unsubscribeTodosDispositivos();
+    };
+  }, []);
 
   /*
    * =========================================================
@@ -191,10 +259,34 @@ const Dashboard = () => {
 
     /*
      * -------------------------------------------------------
+     * SUSCRIPCIÓN A UMBRALES
+     * -------------------------------------------------------
+     */
+
+    const unsubscribeUmbrales =
+      umbralesRepository.suscribirseAUmbralesPorIncubadora(
+        incubadoraId,
+        (nuevosUmbrales) => {
+          setUmbrales(nuevosUmbrales);
+        },
+        (err) => {
+          console.error(
+            "Error en la suscripción de umbrales:",
+            err
+          );
+
+          setError(
+            "No fue posible actualizar los límites configurados."
+          );
+        }
+      );
+
+    /*
+     * -------------------------------------------------------
      * CLEANUP
      * -------------------------------------------------------
      *
-     * Se cancelan AMBAS suscripciones al:
+     * Se cancelan TODAS las suscripciones al:
      *
      * - cambiar de incubadora
      * - desmontar Dashboard
@@ -203,6 +295,7 @@ const Dashboard = () => {
     return () => {
       unsubscribeMediciones();
       unsubscribeDispositivos();
+      unsubscribeUmbrales();
     };
   }, [incubadoraId]);
 
@@ -287,33 +380,52 @@ const Dashboard = () => {
     };
   }, [dispositivos]);
 
+  // Estado general de la incubadora seleccionada: "sin_datos" mientras no
+  // haya nada que evaluar (alertas sin cargar, o sin mediciones ni
+  // dispositivos); si no, lo decide calcularEstadoGeneral.
   const estadoGeneral = useMemo(() => {
-    if (!incubadoraSeleccionada) {
+    if (
+      !incubadoraSeleccionada ||
+      alertasActivas === null ||
+      (!temperatura && !humedad && dispositivos.length === 0)
+    ) {
       return "sin_datos";
     }
 
-    const desconectado =
-      dispositivos.some(
-        (dispositivo) =>
-          dispositivo.estadoConexion ===
-          "desconectado"
-      );
-
-    if (desconectado) {
-      return "advertencia";
-    }
-
-    if (temperatura || humedad) {
-      return "normal";
-    }
-
-    return "sin_datos";
+    return calcularEstadoGeneral({
+      alertasActivas: alertasActivas.filter(
+        (alerta) => alerta.incubadoraId === incubadoraSeleccionada.id
+      ),
+      dispositivos,
+    });
   }, [
     incubadoraSeleccionada,
+    alertasActivas,
     temperatura,
     humedad,
     dispositivos,
   ]);
+
+  // Estado general de CADA incubadora, para el resumen (RF-017). Hasta
+  // que llegan alertas y dispositivos no hay resumen que mostrar.
+  const resumenIncubadoras = useMemo(() => {
+    if (alertasActivas === null || todosDispositivos === null) {
+      return null;
+    }
+
+    return incubadoras.map((incubadora) => ({
+      id: incubadora.id,
+      nombre: incubadora.nombre || incubadora.id,
+      estadoGeneral: calcularEstadoGeneral({
+        alertasActivas: alertasActivas.filter(
+          (alerta) => alerta.incubadoraId === incubadora.id
+        ),
+        dispositivos: todosDispositivos.filter(
+          (dispositivo) => dispositivo.incubadoraId === incubadora.id
+        ),
+      }),
+    }));
+  }, [incubadoras, alertasActivas, todosDispositivos]);
 
   /*
    * =========================================================
@@ -323,7 +435,7 @@ const Dashboard = () => {
 
   if (cargando) {
     return (
-      <section className="dashboard-page">
+      <section className="page dashboard-page">
         <p className="dashboard-message">
           Cargando panel general...
         </p>
@@ -338,7 +450,7 @@ const Dashboard = () => {
    */
 
   return (
-    <section className="dashboard-page">
+    <section className="page dashboard-page">
       <header className="dashboard-page__header">
         <div>
           <p className="dashboard-page__eyebrow">
@@ -390,6 +502,10 @@ const Dashboard = () => {
         </div>
       )}
 
+      {resumenIncubadoras && resumenIncubadoras.length > 0 && (
+        <QuickSummary incubadoras={resumenIncubadoras} />
+      )}
+
       {!incubadoraSeleccionada ? (
         <p className="dashboard-message">
           No hay incubadoras disponibles.
@@ -425,11 +541,17 @@ const Dashboard = () => {
             {/* [03] Temperatura */}
             <TemperatureCard
               medicion={temperatura}
+              umbral={aUmbralDeTarjeta(
+                umbrales?.temperatura
+              )}
             />
 
             {/* [04] Humedad */}
             <HumidityCard
               medicion={humedad}
+              umbral={aUmbralDeTarjeta(
+                umbrales?.humedad
+              )}
             />
 
             {/* [05] Última actualización */}
