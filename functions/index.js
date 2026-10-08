@@ -542,6 +542,25 @@ exports.crearDispositivo = functions.https.onCall(async (data, context) => {
 });
 
 /**
+ * Compara dos tokens en tiempo constante.
+ *
+ * "crypto.timingSafeEqual" exige buffers de igual longitud (si no,
+ * lanza una excepción), por lo que se comparan los hashes SHA-256 de
+ * ambos valores: siempre miden 32 bytes y no se filtra la longitud
+ * del token esperado ni se lanza un error ante un token de otro largo.
+ *
+ * @param {string} recibido Token enviado por el cliente.
+ * @param {string} esperado Token configurado en el entorno.
+ * @returns {boolean}
+ */
+function tokensCoinciden(recibido, esperado) {
+  const hashRecibido = crypto.createHash("sha256").update(recibido).digest();
+  const hashEsperado = crypto.createHash("sha256").update(esperado).digest();
+
+  return crypto.timingSafeEqual(hashRecibido, hashEsperado);
+}
+
+/**
  * Cloud Function HTTPS: procesarMedicion
  *
  * Recibe mediciones exclusivamente desde el Servicio de Integración.
@@ -604,7 +623,7 @@ exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
 
   const expectedToken = process.env.INTEGRATION_SERVICE_TOKEN;
 
-  if (!expectedToken || token !== expectedToken) {
+  if (!expectedToken || !tokensCoinciden(token, expectedToken)) {
     console.warn(
       "Intento de acceso no autorizado a procesarMedicion."
     );
