@@ -1001,6 +1001,22 @@ exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
 });
 
 /**
+ * Escapa los caracteres especiales de HTML de un texto para poder
+ * interpolarlo de forma segura en el cuerpo HTML de un correo.
+ *
+ * @param {*} texto
+ * @returns {string}
+ */
+function escaparHtml(texto) {
+  return String(texto)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
  * Cloud Function trigger: notificarAlerta
  *
  * Se ejecuta automáticamente cuando se crea una nueva alerta:
@@ -1054,14 +1070,29 @@ exports.notificarAlerta = functions.firestore
     // 2. Obtener datos de la alerta
     // ---------------------------------------------------------
 
+    // "titulo" y "mensaje" los escribe evaluarUmbrales al crear la
+    // alerta. Si faltan, se arma un texto de respaldo con los demás
+    // campos de la alerta (variable, valor, limite, tipo).
+    const hayDetalle =
+      typeof alerta.variable === "string" &&
+      alerta.valor !== undefined &&
+      alerta.limite !== undefined;
+
     const titulo =
-      alerta.titulo || "Nueva alerta de MindGame";
+      alerta.titulo ||
+      (typeof alerta.variable === "string"
+        ? `Alerta de ${alerta.variable} en M.T.P.A.`
+        : "Nueva alerta de M.T.P.A.");
 
     const mensaje =
       alerta.mensaje ||
       alerta.descripcion ||
       alerta.texto ||
-      "Se ha generado una nueva alerta.";
+      (hayDetalle
+        ? `La ${alerta.variable} registró ${alerta.valor}, ` +
+          `${alerta.tipo === "baja" ? "por debajo" : "por encima"} del ` +
+          `límite de ${alerta.limite}.`
+        : "Se ha generado una nueva alerta.");
 
     // ---------------------------------------------------------
     // 3. Preparar destinatarios
@@ -1113,10 +1144,10 @@ exports.notificarAlerta = functions.firestore
           text: mensaje,
 
           html: `
-            <h2>${titulo}</h2>
-            <p>${mensaje}</p>
+            <h2>${escaparHtml(titulo)}</h2>
+            <p>${escaparHtml(mensaje)}</p>
             <p>
-              Se generó una nueva alerta en MindGame.
+              Se generó una nueva alerta en M.T.P.A.
             </p>
           `,
         },
