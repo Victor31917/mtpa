@@ -51,24 +51,20 @@ function ConnectionStatus({
   estadoConexion = "desconectado",
   ultimaComunicacionEn = null,
 }) {
-  const [tiempoTranscurrido, setTiempoTranscurrido] = useState(() =>
-    calcularTiempoTranscurrido(ultimaComunicacionEn)
-  );
+  // Fuerza un nuevo render cada minuto para refrescar el texto relativo.
+  const [, setTick] = useState(0);
 
   useEffect(() => {
-    setTiempoTranscurrido(
-      calcularTiempoTranscurrido(ultimaComunicacionEn)
-    );
-
-    // Actualiza el texto cada minuto.
     const interval = setInterval(() => {
-      setTiempoTranscurrido(
-        calcularTiempoTranscurrido(ultimaComunicacionEn)
-      );
+      setTick((tick) => tick + 1);
     }, 60 * 1000);
 
     return () => clearInterval(interval);
-  }, [ultimaComunicacionEn]);
+  }, []);
+
+  const tiempoTranscurrido = calcularTiempoTranscurrido(
+    ultimaComunicacionEn
+  );
 
   const conectado = estadoConexion === "conectado";
 
