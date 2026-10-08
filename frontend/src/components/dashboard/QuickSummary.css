@@ -1,0 +1,151 @@
+/* =========================================================
+   M.T.P.A. - RESUMEN RÁPIDO DE INCUBADORAS
+   ========================================================= */
+
+.quick-summary {
+  width: 100%;
+  padding: var(--spacing-5);
+  box-sizing: border-box;
+
+  background-color: var(--color-surface);
+  border: var(--border-default);
+  border-radius: var(--radius-lg);
+
+  box-shadow: var(--shadow-sm);
+}
+
+.quick-summary__totales {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--spacing-4);
+}
+
+.quick-summary__total {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-1);
+
+  padding: var(--spacing-3) var(--spacing-4);
+
+  background-color: var(--color-background-secondary);
+  border-radius: var(--radius-md);
+}
+
+.quick-summary__numero {
+  color: var(--color-heading);
+
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-tight);
+}
+
+.quick-summary__etiqueta {
+  color: var(--color-text-secondary);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.quick-summary__total--normal {
+  background-color: var(--color-success-light);
+}
+
+.quick-summary__total--normal .quick-summary__numero {
+  color: var(--color-success-dark);
+}
+
+.quick-summary__total--advertencia {
+  background-color: var(--color-warning-light);
+}
+
+.quick-summary__total--advertencia .quick-summary__numero {
+  color: var(--color-warning-dark);
+}
+
+.quick-summary__total--critico {
+  background-color: var(--color-danger-light);
+}
+
+.quick-summary__total--critico .quick-summary__numero {
+  color: var(--color-danger-dark);
+}
+
+.quick-summary__lista {
+  display: flex;
+  flex-direction: column;
+
+  margin: var(--spacing-4) 0 0;
+  padding: 0;
+
+  list-style: none;
+}
+
+.quick-summary__fila {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  gap: var(--spacing-3);
+
+  padding: var(--spacing-2) 0;
+
+  border-top: 1px solid var(--color-border-light);
+}
+
+.quick-summary__nombre {
+  min-width: 0;
+
+  color: var(--color-text-primary);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-summary__estado {
+  flex-shrink: 0;
+
+  padding: var(--spacing-1) var(--spacing-3);
+
+  color: var(--color-text-secondary);
+  background-color: var(--color-background-secondary);
+
+  border-radius: var(--radius-pill);
+
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.quick-summary__estado--normal {
+  color: var(--color-success-dark);
+  background-color: var(--color-success-light);
+}
+
+.quick-summary__estado--advertencia {
+  color: var(--color-warning-dark);
+  background-color: var(--color-warning-light);
+}
+
+.quick-summary__estado--critico {
+  color: var(--color-danger-dark);
+  background-color: var(--color-danger-light);
+}
+
+@media (max-width: 768px) {
+  .quick-summary__totales {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 400px) {
+  .quick-summary {
+    padding: var(--spacing-4);
+  }
+
+  .quick-summary__totales {
+    gap: var(--spacing-3);
+  }
+}
