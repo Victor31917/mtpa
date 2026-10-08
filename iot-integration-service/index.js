@@ -70,6 +70,25 @@ const BACKOFF_INICIAL_MS = Number.parseInt(
 );
 
 // =========================================================
+// Configuración de órdenes de ventilador
+// =========================================================
+
+/*
+ * Una orden que sigue pendiente pasado este tiempo no se envía:
+ * se marca "expirada". Evita que, por ejemplo tras reiniciar el
+ * servicio, se accione un ventilador con una orden vieja.
+ */
+const ORDEN_MAX_ANTIGUEDAD_SEGUNDOS_ENTORNO = Number.parseInt(
+  process.env.ORDEN_MAX_ANTIGUEDAD_SEGUNDOS,
+  10
+);
+
+const ORDEN_MAX_ANTIGUEDAD_MS =
+  (ORDEN_MAX_ANTIGUEDAD_SEGUNDOS_ENTORNO > 0
+    ? ORDEN_MAX_ANTIGUEDAD_SEGUNDOS_ENTORNO
+    : 60) * 1000;
+
+// =========================================================
 // Tópicos MQTT
 // =========================================================
 
@@ -568,12 +587,15 @@ function conectar(
 //
 //   estado == "pendiente"
 //
-// Por cada orden nueva:
+// Por cada orden pendiente (ver procesarOrdenPendiente):
 //
-//   1. Obtiene los datos.
-//   2. Construye el tópico MQTT.
-//   3. Publica el comando.
-//   4. Actualiza la orden a "enviada".
+//   1. La reclama en una transacción (pendiente -> enviando).
+//   2. Valida los datos y descarta las órdenes vencidas.
+//   3. Construye el tópico MQTT y publica el comando.
+//   4. Actualiza la orden a "enviada" (o "fallida").
+//
+// Si MQTT no está conectado la orden queda "pendiente" y se
+// vuelve a revisar en cada (re)conexión.
 //
 // =========================================================
 
@@ -591,9 +613,29 @@ function escucharOrdenesPendientes(cliente) {
 
   const consulta = db
     .collection("ordenes_ventilador")
-    .where("estado", "==", "pendiente");
+    .where("estado", "==", ESTADO_ORDEN.PENDIENTE);
 
-  return consulta.onSnapshot(
+  // Al (re)conectar se revisan las órdenes que quedaron
+  // pendientes mientras MQTT no estaba disponible.
+  const revisarPendientes = async () => {
+    try {
+      const snapshot = await consulta.get();
+
+      snapshot.docs.forEach((doc) => {
+        procesarOrdenPendiente(doc, cliente);
+      });
+    } catch (error) {
+      console.error(
+        "[iot-integration-service] Error revisando " +
+          "ordenes_ventilador pendientes:",
+        error
+      );
+    }
+  };
+
+  cliente.on("connect", revisarPendientes);
+
+  const cancelarSnapshot = consulta.onSnapshot(
     (snapshot) => {
       snapshot.docChanges().forEach((change) => {
         // Solo procesamos documentos que aparecen como nuevos.
@@ -612,6 +654,11 @@ function escucharOrdenesPendientes(cliente) {
       );
     }
   );
+
+  return () => {
+    cancelarSnapshot();
+    cliente.removeListener("connect", revisarPendientes);
+  };
 }
 
 // =========================================================
@@ -625,8 +672,10 @@ function escucharOrdenesPendientes(cliente) {
 
 const ESTADO_ORDEN = {
   PENDIENTE: "pendiente",
+  ENVIANDO: "enviando",
   ENVIADA: "enviada",
   FALLIDA: "fallida",
+  EXPIRADA: "expirada",
 };
 
 const ACCIONES_VALIDAS = ["encender", "apagar"];
@@ -666,6 +715,14 @@ function validarOrden(orden) {
       'accionSolicitada debe ser "encender" o "apagar" ' +
       `(recibido: ${JSON.stringify(orden.accionSolicitada)}).`
     );
+  }
+
+  // Sin fecha de creación no se puede saber si la orden venció.
+  if (
+    !orden.creadaEn ||
+    typeof orden.creadaEn.toMillis !== "function"
+  ) {
+    return "La orden no tiene una fecha de creación (creadaEn) válida.";
   }
 
   return null;
@@ -714,6 +771,35 @@ async function marcarOrdenFallida(ordenRef, motivo) {
   }
 }
 
+/**
+ * Cambia el estado de una orden dentro de una transacción, solo
+ * si todavía está en el estado "desde". Es lo que garantiza que
+ * dos instancias del servicio (o un snapshot repetido) no
+ * reclamen la misma orden dos veces.
+ *
+ * @param {FirebaseFirestore.DocumentReference} ordenRef
+ * @param {string} desde Estado esperado.
+ * @param {string} hasta Estado nuevo.
+ * @returns {Promise<Object|null>} Datos de la orden si se hizo el
+ * cambio, o null si ya no estaba en el estado esperado.
+ */
+function transicionarOrden(ordenRef, desde, hasta) {
+  return db.runTransaction(async (transaccion) => {
+    const snapshot = await transaccion.get(ordenRef);
+
+    if (!snapshot.exists || snapshot.data().estado !== desde) {
+      return null;
+    }
+
+    transaccion.update(ordenRef, {
+      estado: hasta,
+      actualizadaEn: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return snapshot.data();
+  });
+}
+
 // =========================================================
 // PROCESAR UNA ORDEN PENDIENTE
 // =========================================================
@@ -721,7 +807,70 @@ async function marcarOrdenFallida(ordenRef, motivo) {
 async function procesarOrdenPendiente(ordenDoc, cliente) {
   const ordenRef = ordenDoc.ref;
   const ordenId = ordenDoc.id;
-  const orden = ordenDoc.data();
+
+  // -------------------------------------------------------
+  // Verificar conexión MQTT
+  // -------------------------------------------------------
+  //
+  // Sin conexión no se toca la orden: queda "pendiente" y se
+  // revisa de nuevo en la próxima conexión.
+  //
+
+  if (!cliente.connected) {
+    console.warn(
+      `[iot-integration-service] MQTT no está conectado. ` +
+        `La orden ${ordenId} permanece pendiente.`
+    );
+    return;
+  }
+
+  // -------------------------------------------------------
+  // Reclamar la orden (pendiente -> enviando)
+  // -------------------------------------------------------
+
+  let orden;
+
+  try {
+    orden = await transicionarOrden(
+      ordenRef,
+      ESTADO_ORDEN.PENDIENTE,
+      ESTADO_ORDEN.ENVIANDO
+    );
+  } catch (error) {
+    console.error(
+      `[iot-integration-service] No se pudo reclamar la ` +
+        `orden ${ordenId}:`,
+      error
+    );
+    return;
+  }
+
+  if (!orden) {
+    // Otra instancia (o un snapshot anterior) ya la tomó.
+    return;
+  }
+
+  try {
+    await enviarOrdenReclamada(ordenRef, orden, cliente);
+  } catch (error) {
+    await marcarOrdenFallida(
+      ordenRef,
+      `Error inesperado: ${error.message}`
+    );
+  }
+}
+
+/**
+ * Valida, descarta si venció y publica una orden que esta
+ * instancia ya reclamó (estado "enviando").
+ *
+ * @param {FirebaseFirestore.DocumentReference} ordenRef
+ * @param {Object} orden Datos de la orden reclamada.
+ * @param {import("mqtt").MqttClient} cliente
+ * @returns {Promise<void>}
+ */
+async function enviarOrdenReclamada(ordenRef, orden, cliente) {
+  const ordenId = ordenRef.id;
 
   // -------------------------------------------------------
   // Validar datos necesarios
@@ -735,14 +884,43 @@ async function procesarOrdenPendiente(ordenDoc, cliente) {
   }
 
   // -------------------------------------------------------
-  // Verificar conexión MQTT
+  // Descartar órdenes vencidas
   // -------------------------------------------------------
+
+  const antiguedadMs = Date.now() - orden.creadaEn.toMillis();
+
+  if (antiguedadMs > ORDEN_MAX_ANTIGUEDAD_MS) {
+    const motivo =
+      `La orden venció: tiene ${Math.round(antiguedadMs / 1000)} s ` +
+      `y el máximo es ${ORDEN_MAX_ANTIGUEDAD_MS / 1000} s.`;
+
+    console.warn(
+      `[iot-integration-service] Orden ${ordenId} expirada. ` +
+        motivo
+    );
+
+    await marcarOrden(ordenRef, ESTADO_ORDEN.EXPIRADA, {
+      error: motivo,
+    });
+    return;
+  }
+
+  // -------------------------------------------------------
+  // Reconfirmar la conexión MQTT
+  // -------------------------------------------------------
+  //
+  // Si se cayó mientras se reclamaba la orden, se devuelve a
+  // "pendiente": el cliente MQTT encolaría la publicación y la
+  // entregaría recién al reconectar, quizás tarde.
+  //
 
   if (!cliente.connected) {
     console.warn(
-      `[iot-integration-service] MQTT no está conectado. ` +
-        `La orden ${ordenId} permanece pendiente.`
+      `[iot-integration-service] MQTT se desconectó. ` +
+        `La orden ${ordenId} vuelve a pendiente.`
     );
+
+    await marcarOrden(ordenRef, ESTADO_ORDEN.PENDIENTE);
     return;
   }
 
@@ -761,15 +939,10 @@ async function procesarOrdenPendiente(ordenDoc, cliente) {
     `${orden.dispositivoId}/` +
     `comando`;
 
-  const solicitadoEn =
-    orden.creadaEn && typeof orden.creadaEn.toDate === "function"
-      ? orden.creadaEn.toDate().toISOString()
-      : null;
-
   const payload = JSON.stringify({
     accion: orden.accionSolicitada,
     ordenId,
-    solicitadoEn,
+    solicitadoEn: new Date(orden.creadaEn.toMillis()).toISOString(),
   });
 
   // -------------------------------------------------------
@@ -794,6 +967,10 @@ async function procesarOrdenPendiente(ordenDoc, cliente) {
   // -------------------------------------------------------
   // Actualizar estado
   // -------------------------------------------------------
+  //
+  // Si esta escritura falla, la orden queda en "enviando": el
+  // comando ya salió y no debe publicarse otra vez.
+  //
 
   try {
     await marcarOrden(ordenRef, ESTADO_ORDEN.ENVIADA, {
