@@ -1289,11 +1289,36 @@ exports.enviarComandoVentilador = functions.https.onCall(async (data, context) =
   }
 
   // ----------------------------------------------------------
-  // 5. Crear la orden
+  // 5. Resolver la incubadora y el dispositivo del ventilador
+  // ----------------------------------------------------------
+  //
+  // El Servicio de Integración necesita incubadoraId y
+  // dispositivoId para armar el tópico MQTT del comando
+  // (ver docs/contrato-mqtt.md), por eso se copian a la orden
+  // desde el documento del ventilador.
+  //
+  const { incubadoraId, dispositivoId } = ventilador;
+
+  if (
+    !incubadoraId ||
+    typeof incubadoraId !== "string" ||
+    !dispositivoId ||
+    typeof dispositivoId !== "string"
+  ) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "El ventilador no tiene incubadora o dispositivo asociado, por lo que no se puede enviar el comando."
+    );
+  }
+
+  // ----------------------------------------------------------
+  // 6. Crear la orden
   // ----------------------------------------------------------
 
   const ordenRef = await db.collection(COLECCION_ORDENES_VENTILADOR).add({
     ventiladorId,
+    incubadoraId,
+    dispositivoId,
     accionSolicitada,
     origen: "manual",
     estado: "pendiente",
@@ -1302,7 +1327,7 @@ exports.enviarComandoVentilador = functions.https.onCall(async (data, context) =
   });
 
   // ----------------------------------------------------------
-  // 6. Respuesta
+  // 7. Respuesta
   // ----------------------------------------------------------
 
   return {
