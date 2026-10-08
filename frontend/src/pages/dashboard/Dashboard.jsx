@@ -112,6 +112,18 @@ const Dashboard = () => {
   }, []);
 
   /*
+   * Al cambiar de incubadora se descartan los datos y el error
+   * de la anterior para no mostrarlos mientras llegan los nuevos.
+   */
+
+  const cambiarIncubadora = (nuevaIncubadoraId) => {
+    setMediciones([]);
+    setDispositivos([]);
+    setError("");
+    setIncubadoraId(nuevaIncubadoraId);
+  };
+
+  /*
    * =========================================================
    * SUSCRIPCIONES EN TIEMPO REAL
    * =========================================================
@@ -126,22 +138,8 @@ const Dashboard = () => {
 
   useEffect(() => {
     if (!incubadoraId) {
-       const [medicionesState, setMedicionesState] =
-  useState({
-    incubadoraId: "",
-    datos: [],
-  });
-
-const [dispositivosState, setDispositivosState] =
-  useState({
-    incubadoraId: "",
-    datos: [],
-  });
-
       return undefined;
     }
-
-    setError("");
 
     /*
      * -------------------------------------------------------
@@ -337,7 +335,7 @@ const [dispositivosState, setDispositivosState] =
             <select
               value={incubadoraId}
               onChange={(event) =>
-                setIncubadoraId(
+                cambiarIncubadora(
                   event.target.value
                 )
               }
