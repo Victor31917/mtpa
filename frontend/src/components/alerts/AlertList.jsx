@@ -1,5 +1,4 @@
-jsx
-import AlertCard from "../AlertCard/AlertCard";
+import AlertCard from "./AlertCard";
 import "./AlertList.css";
 
 function AlertList({ alertas = [] }) {
