@@ -677,9 +677,20 @@ async function procesarOrdenPendiente(ordenDoc, cliente) {
     // -------------------------------------------------------
     // Construir payload
     // -------------------------------------------------------
+    //
+    // Formato definido en docs/contrato-mqtt.md: el dispositivo
+    // (y el simulador) leen "accion".
+    //
+
+    const solicitadoEn =
+      orden.creadaEn && typeof orden.creadaEn.toDate === "function"
+        ? orden.creadaEn.toDate().toISOString()
+        : null;
 
     const payload = JSON.stringify({
-      accionSolicitada: orden.accionSolicitada,
+      accion: orden.accionSolicitada,
+      ordenId,
+      solicitadoEn,
     });
 
     // -------------------------------------------------------
