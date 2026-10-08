@@ -1,4 +1,13 @@
 {
-  "indexes": [],
+  "indexes": [
+    {
+      "collectionGroup": "ordenes_ventilador",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ventiladorId", "order": "ASCENDING" },
+        { "fieldPath": "creadaEn", "order": "DESCENDING" }
+      ]
+    }
+  ],
   "fieldOverrides": []
 }
