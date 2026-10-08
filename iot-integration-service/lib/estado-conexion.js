@@ -75,26 +75,6 @@ function segundosValidos(valor, porDefecto) {
 }
 
 /**
- * Convierte un Timestamp de Firestore, Date o número en milisegundos.
- *
- * @param {*} valor
- * @returns {number|null} null si falta o es inválido.
- */
-function aMilisegundos(valor) {
-  let ms = null;
-
-  if (valor && typeof valor.toMillis === "function") {
-    ms = valor.toMillis();
-  } else if (valor instanceof Date) {
-    ms = valor.getTime();
-  } else if (typeof valor === "number") {
-    ms = valor;
-  }
-
-  return Number.isFinite(ms) ? ms : null;
-}
-
-/**
  * Indica si un error de Firestore es "el documento no existe".
  *
  * @param {Object} error
@@ -359,8 +339,11 @@ function crearRastreadorConexion({
   /**
    * Carga los dispositivos que quedaron "conectado" en Firestore
    * (por ejemplo antes de reiniciar el servicio) para que, si no
-   * vuelven a dar señales, se marquen desconectados. Si no tienen
-   * "ultimaComunicacionEn" válida se consideran ya vencidos.
+   * vuelven a dar señales, se marquen desconectados. A todos se les
+   * da el margen completo del timeout contado desde ahora:
+   * "ultimaComunicacionEn" solo se refresca cada cierto tiempo y puede
+   * estar vieja aunque el dispositivo siga vivo, así que no sirve para
+   * decidir si venció.
    * Nunca lanza ni rechaza.
    *
    * @returns {Promise<void>}
@@ -380,14 +363,10 @@ function crearRastreadorConexion({
           return;
         }
 
-        const datos = doc.data() || {};
-        const ms = aMilisegundos(datos.ultimaComunicacionEn);
-        const ultimaSenal = ms === null ? Number.NEGATIVE_INFINITY : Math.min(ms, t);
-
         dispositivos.set(doc.id, {
-          ultimaSenal,
+          ultimaSenal: t,
           estado: CONECTADO,
-          ultimoRefresco: ultimaSenal,
+          ultimoRefresco: t,
           cola: Promise.resolve(),
         });
       });
