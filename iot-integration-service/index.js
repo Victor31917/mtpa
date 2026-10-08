@@ -615,101 +615,189 @@ function escucharOrdenesPendientes(cliente) {
 }
 
 // =========================================================
+// ESTADO DE LAS ÓRDENES
+// =========================================================
+//
+// Vocabulario documentado en docs/modelo-datos.md (basado en
+// COMMAND_STATUS de frontend/src/utils/constants.js).
+//
+// =========================================================
+
+const ESTADO_ORDEN = {
+  PENDIENTE: "pendiente",
+  ENVIADA: "enviada",
+  FALLIDA: "fallida",
+};
+
+const ACCIONES_VALIDAS = ["encender", "apagar"];
+
+// Un id que se usa como segmento de tópico no puede traer
+// separadores ni comodines MQTT.
+const SEGMENTO_TOPICO_RE = /^[^/+#\s]+$/;
+
+/**
+ * Comprueba que la orden tenga todo lo necesario para publicar
+ * el comando.
+ *
+ * @param {Object} orden
+ * @returns {string|null} Motivo del rechazo, o null si es válida.
+ */
+function validarOrden(orden) {
+  if (!orden || typeof orden !== "object") {
+    return "La orden no tiene datos.";
+  }
+
+  if (
+    typeof orden.incubadoraId !== "string" ||
+    !SEGMENTO_TOPICO_RE.test(orden.incubadoraId)
+  ) {
+    return "La orden no tiene un incubadoraId válido.";
+  }
+
+  if (
+    typeof orden.dispositivoId !== "string" ||
+    !SEGMENTO_TOPICO_RE.test(orden.dispositivoId)
+  ) {
+    return "La orden no tiene un dispositivoId válido.";
+  }
+
+  if (!ACCIONES_VALIDAS.includes(orden.accionSolicitada)) {
+    return (
+      'accionSolicitada debe ser "encender" o "apagar" ' +
+      `(recibido: ${JSON.stringify(orden.accionSolicitada)}).`
+    );
+  }
+
+  return null;
+}
+
+/**
+ * Cambia el estado de una orden y registra cuándo.
+ *
+ * @param {FirebaseFirestore.DocumentReference} ordenRef
+ * @param {string} estado
+ * @param {Object} [campos] Campos adicionales a escribir.
+ * @returns {Promise<void>}
+ */
+async function marcarOrden(ordenRef, estado, campos = {}) {
+  await ordenRef.update({
+    estado,
+    actualizadaEn: admin.firestore.FieldValue.serverTimestamp(),
+    ...campos,
+  });
+}
+
+/**
+ * Marca una orden como fallida guardando el motivo. Nunca lanza:
+ * si Firestore también falla, solo se loguea.
+ *
+ * @param {FirebaseFirestore.DocumentReference} ordenRef
+ * @param {string} motivo
+ * @returns {Promise<void>}
+ */
+async function marcarOrdenFallida(ordenRef, motivo) {
+  console.error(
+    `[iot-integration-service] Orden ${ordenRef.id} fallida: ` +
+      motivo
+  );
+
+  try {
+    await marcarOrden(ordenRef, ESTADO_ORDEN.FALLIDA, {
+      error: motivo,
+    });
+  } catch (error) {
+    console.error(
+      `[iot-integration-service] No se pudo marcar la orden ` +
+        `${ordenRef.id} como fallida:`,
+      error
+    );
+  }
+}
+
+// =========================================================
 // PROCESAR UNA ORDEN PENDIENTE
 // =========================================================
 
 async function procesarOrdenPendiente(ordenDoc, cliente) {
+  const ordenRef = ordenDoc.ref;
   const ordenId = ordenDoc.id;
   const orden = ordenDoc.data();
 
-  try {
-    // -------------------------------------------------------
-    // Validar datos necesarios
-    // -------------------------------------------------------
+  // -------------------------------------------------------
+  // Validar datos necesarios
+  // -------------------------------------------------------
 
-    if (!orden.incubadoraId) {
-      console.error(
-        `[iot-integration-service] La orden ${ordenId} ` +
-          "no tiene incubadoraId."
-      );
-      return;
-    }
+  const problema = validarOrden(orden);
 
-    if (!orden.dispositivoId) {
-      console.error(
-        `[iot-integration-service] La orden ${ordenId} ` +
-          "no tiene dispositivoId."
-      );
-      return;
-    }
+  if (problema) {
+    await marcarOrdenFallida(ordenRef, problema);
+    return;
+  }
 
-    if (!orden.accionSolicitada) {
-      console.error(
-        `[iot-integration-service] La orden ${ordenId} ` +
-          "no tiene accionSolicitada."
-      );
-      return;
-    }
+  // -------------------------------------------------------
+  // Verificar conexión MQTT
+  // -------------------------------------------------------
 
-    // -------------------------------------------------------
-    // Verificar conexión MQTT
-    // -------------------------------------------------------
-
-    if (!cliente.connected) {
-      console.warn(
-        `[iot-integration-service] MQTT no está conectado. ` +
-          `La orden ${ordenId} permanece pendiente.`
-      );
-      return;
-    }
-
-    // -------------------------------------------------------
-    // Construir tópico MQTT
-    // -------------------------------------------------------
-
-    const topico =
-      `${MQTT_TOPIC_PREFIX}/` +
-      `${orden.incubadoraId}/` +
-      `ventiladores/` +
-      `${orden.dispositivoId}/` +
-      `comando`;
-
-    // -------------------------------------------------------
-    // Construir payload
-    // -------------------------------------------------------
-    //
-    // Formato definido en docs/contrato-mqtt.md: el dispositivo
-    // (y el simulador) leen "accion".
-    //
-
-    const solicitadoEn =
-      orden.creadaEn && typeof orden.creadaEn.toDate === "function"
-        ? orden.creadaEn.toDate().toISOString()
-        : null;
-
-    const payload = JSON.stringify({
-      accion: orden.accionSolicitada,
-      ordenId,
-      solicitadoEn,
-    });
-
-    // -------------------------------------------------------
-    // Publicar comando
-    // -------------------------------------------------------
-
-    await publicarMensaje(cliente, topico, payload);
-
-    console.log(
-      `[iot-integration-service] Orden ${ordenId} publicada ` +
-        `en "${topico}".`
+  if (!cliente.connected) {
+    console.warn(
+      `[iot-integration-service] MQTT no está conectado. ` +
+        `La orden ${ordenId} permanece pendiente.`
     );
+    return;
+  }
 
-    // -------------------------------------------------------
-    // Actualizar estado
-    // -------------------------------------------------------
+  // -------------------------------------------------------
+  // Construir tópico y payload
+  // -------------------------------------------------------
+  //
+  // Formato definido en docs/contrato-mqtt.md: el dispositivo
+  // (y el simulador) leen "accion".
+  //
 
-    await ordenDoc.ref.update({
-      estado: "enviada",
+  const topico =
+    `${MQTT_TOPIC_PREFIX}/` +
+    `${orden.incubadoraId}/` +
+    `ventiladores/` +
+    `${orden.dispositivoId}/` +
+    `comando`;
+
+  const solicitadoEn =
+    orden.creadaEn && typeof orden.creadaEn.toDate === "function"
+      ? orden.creadaEn.toDate().toISOString()
+      : null;
+
+  const payload = JSON.stringify({
+    accion: orden.accionSolicitada,
+    ordenId,
+    solicitadoEn,
+  });
+
+  // -------------------------------------------------------
+  // Publicar comando
+  // -------------------------------------------------------
+
+  try {
+    await publicarMensaje(cliente, topico, payload);
+  } catch (error) {
+    await marcarOrdenFallida(
+      ordenRef,
+      `No se pudo publicar el comando: ${error.message}`
+    );
+    return;
+  }
+
+  console.log(
+    `[iot-integration-service] Orden ${ordenId} publicada ` +
+      `en "${topico}".`
+  );
+
+  // -------------------------------------------------------
+  // Actualizar estado
+  // -------------------------------------------------------
+
+  try {
+    await marcarOrden(ordenRef, ESTADO_ORDEN.ENVIADA, {
+      enviadaEn: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     console.log(
@@ -718,8 +806,9 @@ async function procesarOrdenPendiente(ordenDoc, cliente) {
     );
   } catch (error) {
     console.error(
-      `[iot-integration-service] Error procesando ` +
-        `orden ${ordenId}:`,
+      `[iot-integration-service] El comando de la orden ` +
+        `${ordenId} se publicó, pero no se pudo actualizar ` +
+        "su estado:",
       error
     );
   }
