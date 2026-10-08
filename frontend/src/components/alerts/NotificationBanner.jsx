@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import alertasRepository from "../../repositories/alertasRepository";
-import { ALERT_STATUS } from "../../utils/constants";
+import { ALERT_STATUS, ROUTES } from "../../utils/constants";
 import "./NotificationBanner.css";
 
 function NotificationBanner() {
@@ -53,6 +54,12 @@ function NotificationBanner() {
       <div className="notification-banner__content">
         <strong className="notification-banner__title">{titulo}</strong>
         <p className="notification-banner__message">{mensaje}</p>
+        <Link
+          to={ROUTES.ALERT_DETAIL.replace(":id", alerta.id)}
+          className="notification-banner__link"
+        >
+          Ver alerta
+        </Link>
       </div>
 
       <button
