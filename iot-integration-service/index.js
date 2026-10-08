@@ -72,10 +72,17 @@ const TOPICO_MEDICION_RE = new RegExp(
   `^${escapeRegExp(MQTT_TOPIC_PREFIX)}/([^/]+)/sensores/([^/]+)/medicion$`
 );
 
-const VARIABLES_VALIDAS = new Set([
-  "temperatura",
-  "humedad",
-]);
+/*
+ * Un mensaje de medición del sensor trae temperatura y/o humedad
+ * en un mismo payload (ver docs/contrato-mqtt.md y el simulador),
+ * pero "procesarMedicion" recibe una variable por petición y exige
+ * su unidad. Esta tabla fija la unidad de cada variable (mismos
+ * valores que UNITS en frontend/src/utils/constants.js).
+ */
+const UNIDAD_POR_VARIABLE = {
+  temperatura: "°C",
+  humedad: "%",
+};
 
 /**
  * Escapa caracteres especiales para utilizar una cadena
@@ -124,7 +131,7 @@ function obtenerContextoDelTopico(topico) {
  *
  * @param {string} topico
  * @param {Object} payload
- * @returns {{valido: boolean, razon?: string, medicion?: Object}}
+ * @returns {{valido: boolean, razon?: string, mediciones?: Object[]}}
  */
 function validarMedicion(topico, payload) {
   const contexto =
@@ -172,23 +179,32 @@ function validarMedicion(topico, payload) {
     };
   }
 
-  if (!VARIABLES_VALIDAS.has(payload.variable)) {
+  const variablesPresentes = Object.keys(
+    UNIDAD_POR_VARIABLE
+  ).filter(
+    (variable) =>
+      payload[variable] !== undefined
+  );
+
+  if (variablesPresentes.length === 0) {
     return {
       valido: false,
       razon:
-        'La variable debe ser "temperatura" o "humedad".',
+        "La medición debe incluir temperatura y/o humedad.",
     };
   }
 
-  if (
-    typeof payload.valor !== "number" ||
-    !Number.isFinite(payload.valor)
-  ) {
-    return {
-      valido: false,
-      razon:
-        "El valor de la medición debe ser numérico y finito.",
-    };
+  for (const variable of variablesPresentes) {
+    if (
+      typeof payload[variable] !== "number" ||
+      !Number.isFinite(payload[variable])
+    ) {
+      return {
+        valido: false,
+        razon:
+          `El valor de ${variable} debe ser numérico y finito.`,
+      };
+    }
   }
 
   if (
@@ -202,13 +218,19 @@ function validarMedicion(topico, payload) {
     };
   }
 
+  // Una medición por variable, con el formato que espera
+  // "procesarMedicion": { incubadoraId, dispositivoId, variable,
+  // valor, unidad, medidoEn }.
   return {
     valido: true,
-    medicion: {
-      ...payload,
+    mediciones: variablesPresentes.map((variable) => ({
       incubadoraId: contexto.incubadoraId,
       dispositivoId: contexto.dispositivoId,
-    },
+      variable,
+      valor: payload[variable],
+      unidad: UNIDAD_POR_VARIABLE[variable],
+      medidoEn: payload.medidoEn,
+    })),
   };
 }
 
@@ -361,23 +383,24 @@ async function manejarMensajeProduccion(
     return;
   }
 
-  try {
-    await invocarProcesarMedicion(
-      validacion.medicion
-    );
+  // Una petición por variable; si una falla, las demás se envían igual.
+  for (const medicion of validacion.mediciones) {
+    try {
+      await invocarProcesarMedicion(medicion);
 
-    console.log(
-      `[iot-integration-service] Medición enviada a ` +
-        `procesarMedicion: ${contexto.incubadoraId}/` +
-        `${contexto.dispositivoId}`
-    );
-  } catch (error) {
-    console.error(
-      `[iot-integration-service] Error al procesar ` +
-        `la medición de ${contexto.incubadoraId}/` +
-        `${contexto.dispositivoId}:`,
-      error.message
-    );
+      console.log(
+        `[iot-integration-service] Medición enviada a ` +
+          `procesarMedicion: ${contexto.incubadoraId}/` +
+          `${contexto.dispositivoId} (${medicion.variable})`
+      );
+    } catch (error) {
+      console.error(
+        `[iot-integration-service] Error al procesar ` +
+          `la medición de ${contexto.incubadoraId}/` +
+          `${contexto.dispositivoId} (${medicion.variable}):`,
+        error.message
+      );
+    }
   }
 }
 
