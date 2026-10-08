@@ -1,0 +1,180 @@
+.alert-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+
+  width: 100%;
+  padding: 1rem 1.25rem;
+
+  box-sizing: border-box;
+
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-left-width: 4px;
+  border-radius: 0.75rem;
+  box-shadow: var(--shadow-sm);
+
+  transition:
+    background-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.alert-card--clickable {
+  cursor: pointer;
+}
+
+.alert-card--clickable:hover {
+  background-color: var(--color-surface-hover);
+  box-shadow: var(--shadow-md);
+}
+
+.alert-card--clickable:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* ================================
+   VARIANTES POR TIPO
+================================ */
+
+.alert-card--alta {
+  border-left-color: var(--color-danger);
+}
+
+.alert-card--alta .alert-card__indicator {
+  background-color: var(--color-danger-light);
+}
+
+.alert-card--baja {
+  border-left-color: var(--color-info);
+}
+
+.alert-card--baja .alert-card__indicator {
+  background-color: var(--color-info-light);
+}
+
+.alert-card--conexion {
+  border-left-color: var(--color-warning);
+}
+
+.alert-card--conexion .alert-card__indicator {
+  background-color: var(--color-warning-light);
+}
+
+.alert-card--sistema {
+  border-left-color: var(--color-border-dark);
+}
+
+.alert-card--sistema .alert-card__indicator {
+  background-color: var(--color-background-secondary);
+}
+
+/* ================================
+   INDICADOR
+================================ */
+
+.alert-card__indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  flex-shrink: 0;
+
+  width: 2.5rem;
+  height: 2.5rem;
+
+  border-radius: 50%;
+  font-size: 1.25rem;
+}
+
+/* ================================
+   CONTENIDO
+================================ */
+
+.alert-card__content {
+  flex: 1;
+  min-width: 0;
+}
+
+.alert-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.alert-card__title {
+  color: var(--color-text-primary);
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.alert-card__message {
+  margin: 0.35rem 0 0;
+
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.alert-card__date {
+  margin: 0.35rem 0 0;
+
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+}
+
+/* ================================
+   ESTADO
+================================ */
+
+.alert-card__status {
+  flex-shrink: 0;
+
+  padding: 0.15rem 0.6rem;
+
+  border-radius: 9999px;
+  background-color: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.alert-card__status--activa {
+  background-color: var(--color-danger-light);
+  color: var(--color-danger-dark);
+}
+
+.alert-card__status--reconocida {
+  background-color: var(--color-warning-light);
+  color: var(--color-warning-dark);
+}
+
+.alert-card__status--resuelta {
+  background-color: var(--color-success-light);
+  color: var(--color-success-dark);
+}
+
+/* ================================
+   RESPONSIVE
+================================ */
+
+@media (max-width: 768px) {
+  .alert-card {
+    gap: 0.75rem;
+    padding: 0.875rem 1rem;
+  }
+
+  .alert-card__indicator {
+    width: 2rem;
+    height: 2rem;
+    font-size: 1rem;
+  }
+
+  .alert-card__header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+}
