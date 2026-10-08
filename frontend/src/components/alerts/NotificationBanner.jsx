@@ -1,29 +1,28 @@
-jsx
 import { useEffect, useState } from "react";
-import * as alertasRepository from "../../repositories/alertasRepository";
+import alertasRepository from "../../repositories/alertasRepository";
+import { ALERT_STATUS } from "../../utils/constants";
 import "./NotificationBanner.css";
 
 function NotificationBanner() {
   const [alerta, setAlerta] = useState(null);
-  const [dismissed, setDismissed] = useState(false);
+  const [descartadaId, setDescartadaId] = useState(null);
 
   useEffect(() => {
     let unsubscribe;
 
     try {
-      // Se suscribe únicamente a las alertas nuevas.
-      unsubscribe = alertasRepository.subscribeAlertas(
+      // Se suscribe únicamente a las alertas activas (las más recientes primero).
+      unsubscribe = alertasRepository.suscribirseAlertas(
+        { estado: ALERT_STATUS.ACTIVE, limite: 20 },
         (alertas) => {
-          if (!alertas || alertas.length === 0) {
-            setAlerta(null);
-            return;
-          }
-
-          // Mostramos la primera alerta nueva.
-          setAlerta(alertas[0]);
-          setDismissed(false);
+          // Mostramos la alerta activa más reciente.
+          setAlerta(alertas && alertas.length > 0 ? alertas[0] : null);
         },
-        { estado: "nueva" }
+        (error) => {
+          // Un fallo de la suscripción no debe romper el layout.
+          console.error("Error al leer las alertas:", error);
+          setAlerta(null);
+        }
       );
     } catch (error) {
       console.error("Error al suscribirse a las alertas:", error);
@@ -36,16 +35,12 @@ function NotificationBanner() {
     };
   }, []);
 
-  // No mostrar nada si no hay alerta o si el usuario la descartó.
-  if (!alerta || dismissed) {
+  // No mostrar nada si no hay alerta o si el usuario ya descartó esta.
+  if (!alerta || alerta.id === descartadaId) {
     return null;
   }
 
-  const mensaje =
-    alerta.mensaje ||
-    alerta.descripcion ||
-    alerta.texto ||
-    "Tienes una nueva notificación.";
+  const mensaje = alerta.mensaje || "Tienes una nueva notificación.";
 
   const titulo = alerta.titulo || "Nueva notificación";
 
@@ -63,7 +58,7 @@ function NotificationBanner() {
       <button
         type="button"
         className="notification-banner__dismiss"
-        onClick={() => setDismissed(true)}
+        onClick={() => setDescartadaId(alerta.id)}
         aria-label="Descartar notificación"
       >
         ×
@@ -73,4 +68,3 @@ function NotificationBanner() {
 }
 
 export default NotificationBanner;
-
