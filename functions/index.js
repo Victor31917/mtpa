@@ -19,6 +19,8 @@ const ROLES_VALIDOS = ["administrador", "operador", "consulta"];
 const COLECCION_USUARIOS = "usuarios";
 const COLECCION_INCUBADORAS = "incubadoras";
 const COLECCION_DISPOSITIVOS = "dispositivos";
+const COLECCION_UMBRALES = "umbrales";
+const COLECCION_ALERTAS = "alertas";
 
 // Variables ambientales que acepta procesarMedicion. Deben coincidir
 // con ENVIRONMENTAL_VARIABLES de frontend/src/utils/constants.js (ver
@@ -566,6 +568,111 @@ function tokensCoinciden(recibido, esperado) {
 }
 
 /**
+ * Evalúa una medición contra el umbral configurado y, si está fuera
+ * de rango, genera una alerta.
+ *
+ * Lee el umbral compuesto "umbrales/{incubadoraId}_{variable}" (campos
+ * "minimo" y "maximo"). Si no hay umbral configurado, no hace nada.
+ * Para no duplicar alertas mientras la condición se sostiene, no crea
+ * una nueva si ya existe una alerta abierta (estado "activa" o
+ * "reconocida") para la misma incubadora + variable + tipo
+ * ("temperatura_alta", "temperatura_baja", "humedad_alta" o
+ * "humedad_baja", ver ALERT_TYPES en frontend/src/utils/constants.js).
+ * Una alerta "resuelta" ya no cuenta: si la condición reaparece, se
+ * genera una alerta nueva.
+ *
+ * No es una Cloud Function: la invoca "procesarMedicion" luego de
+ * almacenar la medición, y quien la llama decide qué hacer ante un error.
+ *
+ * @param {object} medicion
+ * @param {string} medicion.incubadoraId
+ * @param {string} medicion.dispositivoId
+ * @param {string} medicion.variable "temperatura" | "humedad".
+ * @param {number} medicion.valor
+ * @param {string} medicion.unidad
+ * @param {FirebaseFirestore.Timestamp} medicion.medidoEn
+ * @returns {Promise<{alertaCreada: boolean, alertaId?: string}>}
+ */
+async function evaluarUmbrales(medicion) {
+  const { incubadoraId, dispositivoId, variable, valor, unidad, medidoEn } =
+    medicion;
+
+  const db = admin.firestore();
+
+  const umbralSnapshot = await db
+    .collection(COLECCION_UMBRALES)
+    .doc(`${incubadoraId}_${variable}`)
+    .get();
+
+  if (!umbralSnapshot.exists) {
+    return { alertaCreada: false };
+  }
+
+  const umbral = umbralSnapshot.data();
+
+  if (
+    typeof umbral.minimo !== "number" ||
+    typeof umbral.maximo !== "number"
+  ) {
+    console.warn("El documento de umbral tiene límites inválidos.", {
+      umbralId: umbralSnapshot.id,
+    });
+
+    return { alertaCreada: false };
+  }
+
+  let sentido;
+  let limite;
+
+  if (valor > umbral.maximo) {
+    sentido = "alta";
+    limite = umbral.maximo;
+  } else if (valor < umbral.minimo) {
+    sentido = "baja";
+    limite = umbral.minimo;
+  } else {
+    return { alertaCreada: false };
+  }
+
+  const tipo = `${variable}_${sentido}`;
+
+  const alertaExistente = await db
+    .collection(COLECCION_ALERTAS)
+    .where("incubadoraId", "==", incubadoraId)
+    .where("variable", "==", variable)
+    .where("tipo", "==", tipo)
+    .where("estado", "in", ["activa", "reconocida"])
+    .limit(1)
+    .get();
+
+  if (!alertaExistente.empty) {
+    return { alertaCreada: false };
+  }
+
+  const etiqueta = variable.charAt(0).toUpperCase() + variable.slice(1);
+  const posicion =
+    sentido === "alta" ? "por encima del máximo" : "por debajo del mínimo";
+
+  const alertaRef = await db.collection(COLECCION_ALERTAS).add({
+    incubadoraId,
+    dispositivoId,
+    variable,
+    valor,
+    limite,
+    tipo,
+    estado: "activa",
+    titulo: `${etiqueta} fuera de rango`,
+    mensaje:
+      `La ${variable} registró ${valor} ${unidad}, ${posicion} de ` +
+      `${limite} ${unidad}.`,
+    medidoEn,
+    creadaEn: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return { alertaCreada: true, alertaId: alertaRef.id };
+}
+
+/**
  * Cloud Function HTTPS: procesarMedicion
  *
  * Recibe mediciones exclusivamente desde el Servicio de Integración.
@@ -843,19 +950,27 @@ exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
   // 10. Punto de entrada para evaluación de umbrales
   // ---------------------------------------------------------
 
-  // TODO Sprint 3: comparar esta medición contra los
-  // umbrales configurados para la incubadora/dispositivo.
-  //
-  // Ejemplo futuro:
-  //
-  // await evaluarUmbrales({
-  //   incubadoraId,
-  //   dispositivoId,
-  //   variable,
-  //   valor,
-  //   unidad,
-  //   medidoEn: medidoEnTimestamp,
-  // });
+  // La medición ya está almacenada: si la evaluación de umbrales
+  // falla, se registra el error pero no se hace fallar la ingesta
+  // (el Servicio de Integración reintentaría una medición ya guardada).
+
+  try {
+    await evaluarUmbrales({
+      incubadoraId,
+      dispositivoId,
+      variable,
+      valor,
+      unidad,
+      medidoEn: medidoEnTimestamp,
+    });
+  } catch (error) {
+    console.error("Error al evaluar umbrales de la medición.", {
+      medicionId: medicionRef.id,
+      incubadoraId,
+      variable,
+      error: error.message,
+    });
+  }
 
   // ---------------------------------------------------------
   // 11. Automatización de ventiladores
