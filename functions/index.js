@@ -1000,3 +1000,188 @@ exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
   });
 });
 
+// Textos legibles de los tipos de alerta de umbrales. Deben coincidir con
+// ALERT_TYPES de frontend/src/utils/constants.js (temperatura/humedad,
+// alta/baja).
+const TIPOS_ALERTA_LEGIBLES = {
+  temperatura_alta: "temperatura alta",
+  temperatura_baja: "temperatura baja",
+  humedad_alta: "humedad alta",
+  humedad_baja: "humedad baja",
+};
+
+/**
+ * Escapa los caracteres especiales de HTML de un texto para poder
+ * interpolarlo de forma segura en el cuerpo HTML de un correo.
+ *
+ * @param {*} texto
+ * @returns {string}
+ */
+function escaparHtml(texto) {
+  return String(texto)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Cloud Function trigger: notificarAlerta
+ *
+ * Se ejecuta automáticamente cuando se crea una nueva alerta:
+ *
+ * alertas/{alertaId}
+ *
+ * IMPORTANTE:
+ * - NO es callable.
+ * - NO es un endpoint HTTPS.
+ * - NO debe ser invocada desde el cliente web.
+ * - El cliente recibe la alerta in-app mediante su listener
+ *   en tiempo real sobre la colección "alertas".
+ *
+ * Esta función se encarga únicamente de preparar el envío
+ * de correo electrónico a los administradores activos.
+ */
+exports.notificarAlerta = functions.firestore
+  .document("alertas/{alertaId}")
+  .onCreate(async (snap, context) => {
+    const alerta = snap.data();
+
+    if (!alerta) {
+      console.warn(
+        `La alerta ${context.params.alertaId} no contiene datos.`
+      );
+
+      return null;
+    }
+
+    const db = admin.firestore();
+
+    // ---------------------------------------------------------
+    // 1. Buscar administradores activos
+    // ---------------------------------------------------------
+
+    const administradoresSnapshot = await db
+      .collection(COLECCION_USUARIOS)
+      .where("rol", "==", "administrador")
+      .where("activo", "==", true)
+      .get();
+
+    if (administradoresSnapshot.empty) {
+      console.log(
+        "No existen administradores activos para notificar."
+      );
+
+      return null;
+    }
+
+    // ---------------------------------------------------------
+    // 2. Obtener datos de la alerta
+    // ---------------------------------------------------------
+
+    // "titulo" y "mensaje" los escribe evaluarUmbrales al crear la
+    // alerta. Si faltan, se arma un texto de respaldo con los demás
+    // campos de la alerta (variable, valor, limite, tipo).
+    const hayDetalle =
+      typeof alerta.variable === "string" &&
+      alerta.valor !== undefined &&
+      alerta.limite !== undefined;
+
+    // "tipo" usa los valores de ALERT_TYPES (por ejemplo
+    // "temperatura_alta"); si no es uno conocido, se usa la variable.
+    const tipoLegible =
+      TIPOS_ALERTA_LEGIBLES[alerta.tipo] ||
+      (typeof alerta.variable === "string" ? alerta.variable : null);
+
+    const titulo =
+      alerta.titulo ||
+      (tipoLegible
+        ? `Alerta de ${tipoLegible} en M.T.P.A.`
+        : "Nueva alerta de M.T.P.A.");
+
+    const mensaje =
+      alerta.mensaje ||
+      alerta.descripcion ||
+      alerta.texto ||
+      (hayDetalle
+        ? `La ${alerta.variable} registró ${alerta.valor}, ` +
+          `${
+            typeof alerta.tipo === "string" && alerta.tipo.endsWith("_baja")
+              ? "por debajo"
+              : "por encima"
+          } del límite de ${alerta.limite}.`
+        : "Se ha generado una nueva alerta.");
+
+    // ---------------------------------------------------------
+    // 3. Preparar destinatarios
+    // ---------------------------------------------------------
+
+    const destinatarios = administradoresSnapshot.docs
+      .map((doc) => doc.data())
+      .map((usuario) => usuario.correo)
+      .filter(
+        (correo) =>
+          typeof correo === "string" &&
+          correo.trim().length > 0
+      );
+
+    if (destinatarios.length === 0) {
+      console.log(
+        "Los administradores activos no tienen correos válidos."
+      );
+
+      return null;
+    }
+
+    // ---------------------------------------------------------
+    // 4. Trigger Email de Firebase
+    // ---------------------------------------------------------
+    //
+    // La extensión "Trigger Email" utiliza una colección
+    // configurada para enviar correos.
+    //
+    // IMPORTANTE:
+    // Cambia "mail" por el nombre real de la colección que
+    // hayas configurado en la extensión.
+    //
+    // La función NO envía directamente el correo.
+    // Solo crea los documentos que procesará la extensión.
+    // ---------------------------------------------------------
+
+    const batch = db.batch();
+
+    destinatarios.forEach((correo) => {
+      const correoRef = db.collection("mail").doc();
+
+      batch.set(correoRef, {
+        to: correo,
+
+        message: {
+          subject: titulo,
+
+          text: mensaje,
+
+          html: `
+            <h2>${escaparHtml(titulo)}</h2>
+            <p>${escaparHtml(mensaje)}</p>
+            <p>
+              Se generó una nueva alerta en M.T.P.A.
+            </p>
+          `,
+        },
+      });
+    });
+
+    await batch.commit();
+
+    console.log(
+      `Correo preparado para ${destinatarios.length} administrador(es).`,
+      {
+        alertaId: context.params.alertaId,
+      }
+    );
+
+    return null;
+  });
+
