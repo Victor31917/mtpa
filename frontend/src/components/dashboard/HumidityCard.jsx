@@ -1,9 +1,12 @@
-import React from "react";
-import "./HumedadCard.css";
+import { formatTime } from "../../utils/dateUtils";
+import "./HumidityCard.css";
 
-const HumedadCard = ({ medicion, umbral }) => {
+// Props:
+// - medicion: última medición de humedad { valor, unidad, medidoEn }
+// - umbral (opcional): { min, max } para resaltar valores fuera de rango
+const HumidityCard = ({ medicion, umbral }) => {
   const valor = medicion?.valor;
-  const fecha = medicion?.fecha;
+  const medidoEn = medicion?.medidoEn;
 
   // Verificar si la humedad está fuera del umbral configurado.
   const fueraDeUmbral =
@@ -11,21 +14,6 @@ const HumedadCard = ({ medicion, umbral }) => {
     valor !== undefined &&
     valor !== null &&
     (valor < umbral.min || valor > umbral.max);
-
-  const formatearHora = (fecha) => {
-    if (!fecha) return "--:--";
-
-    const date = new Date(fecha);
-
-    if (Number.isNaN(date.getTime())) {
-      return "--:--";
-    }
-
-    return date.toLocaleTimeString("es-CO", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  };
 
   return (
     <div
@@ -46,7 +34,7 @@ const HumedadCard = ({ medicion, umbral }) => {
       </div>
 
       <div className="humedad-card__hora">
-        Última lectura: {formatearHora(fecha)}
+        Última lectura: {medidoEn ? formatTime(medidoEn) : "--:--"}
       </div>
 
       {fueraDeUmbral && (
@@ -58,4 +46,4 @@ const HumedadCard = ({ medicion, umbral }) => {
   );
 };
 
-export default HumedadCard;
+export default HumidityCard;

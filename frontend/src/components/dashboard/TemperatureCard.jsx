@@ -1,32 +1,18 @@
-import React from "react";
-import "./TemperaturaCard.css";
+import { formatTime } from "../../utils/dateUtils";
+import "./TemperatureCard.css";
 
-const TemperaturaCard = ({ medicion, umbral }) => {
+// Props:
+// - medicion: última medición de temperatura { valor, unidad, medidoEn }
+// - umbral (opcional): { min, max } para resaltar valores fuera de rango
+const TemperatureCard = ({ medicion, umbral }) => {
   const valor = medicion?.valor;
-  const fecha = medicion?.fecha;
-
-  // TODO: cuando Dashboard.jsx envíe el umbral, validar:
-  // valor < umbral.min || valor > umbral.max
+  const medidoEn = medicion?.medidoEn;
 
   const fueraDeUmbral =
     umbral &&
     valor !== undefined &&
+    valor !== null &&
     (valor < umbral.min || valor > umbral.max);
-
-  const formatearHora = (fecha) => {
-    if (!fecha) return "--:--";
-
-    const date = new Date(fecha);
-
-    if (Number.isNaN(date.getTime())) {
-      return "--:--";
-    }
-
-    return date.toLocaleTimeString("es-CO", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  };
 
   return (
     <div
@@ -47,7 +33,7 @@ const TemperaturaCard = ({ medicion, umbral }) => {
       </div>
 
       <div className="temperatura-card__hora">
-        Última lectura: {formatearHora(fecha)}
+        Última lectura: {medidoEn ? formatTime(medidoEn) : "--:--"}
       </div>
 
       {fueraDeUmbral && (
@@ -59,4 +45,4 @@ const TemperaturaCard = ({ medicion, umbral }) => {
   );
 };
 
-export default TemperaturaCard;
+export default TemperatureCard;
