@@ -23,7 +23,10 @@ Cada documento tiene esta forma:
 | `message.html`    | `titulo` y `mensaje` con el HTML escapado, más una línea fija de M.T.P.A. |
 
 Si la alerta no trae `titulo` o `mensaje`, la función arma un texto de
-respaldo con `variable`, `valor`, `limite` y `tipo`.
+respaldo con `variable`, `valor`, `limite` y `tipo`. El `tipo` usa los
+valores de `ALERT_TYPES` (`temperatura_alta`, `temperatura_baja`,
+`humedad_alta`, `humedad_baja`) y se muestra en español legible, por ejemplo
+"Alerta de temperatura alta en M.T.P.A.".
 
 ## Configuración requerida
 

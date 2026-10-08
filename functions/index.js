@@ -1000,6 +1000,16 @@ exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
   });
 });
 
+// Textos legibles de los tipos de alerta de umbrales. Deben coincidir con
+// ALERT_TYPES de frontend/src/utils/constants.js (temperatura/humedad,
+// alta/baja).
+const TIPOS_ALERTA_LEGIBLES = {
+  temperatura_alta: "temperatura alta",
+  temperatura_baja: "temperatura baja",
+  humedad_alta: "humedad alta",
+  humedad_baja: "humedad baja",
+};
+
 /**
  * Escapa los caracteres especiales de HTML de un texto para poder
  * interpolarlo de forma segura en el cuerpo HTML de un correo.
@@ -1078,10 +1088,16 @@ exports.notificarAlerta = functions.firestore
       alerta.valor !== undefined &&
       alerta.limite !== undefined;
 
+    // "tipo" usa los valores de ALERT_TYPES (por ejemplo
+    // "temperatura_alta"); si no es uno conocido, se usa la variable.
+    const tipoLegible =
+      TIPOS_ALERTA_LEGIBLES[alerta.tipo] ||
+      (typeof alerta.variable === "string" ? alerta.variable : null);
+
     const titulo =
       alerta.titulo ||
-      (typeof alerta.variable === "string"
-        ? `Alerta de ${alerta.variable} en M.T.P.A.`
+      (tipoLegible
+        ? `Alerta de ${tipoLegible} en M.T.P.A.`
         : "Nueva alerta de M.T.P.A.");
 
     const mensaje =
@@ -1090,8 +1106,11 @@ exports.notificarAlerta = functions.firestore
       alerta.texto ||
       (hayDetalle
         ? `La ${alerta.variable} registró ${alerta.valor}, ` +
-          `${alerta.tipo === "baja" ? "por debajo" : "por encima"} del ` +
-          `límite de ${alerta.limite}.`
+          `${
+            typeof alerta.tipo === "string" && alerta.tipo.endsWith("_baja")
+              ? "por debajo"
+              : "por encima"
+          } del límite de ${alerta.limite}.`
         : "Se ha generado una nueva alerta.");
 
     // ---------------------------------------------------------
