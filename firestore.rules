@@ -17,6 +17,18 @@ service cloud.firestore {
     }
 
     // ---------------------------------------------------------
+    // Helper: isAdminOrOperator()
+    //
+    // Mismo criterio que isAdmin() (custom claim "role"), pero
+    // también admite al rol "operador". El rol "consulta" queda
+    // fuera: es de solo lectura.
+    // ---------------------------------------------------------
+    function isAdminOrOperator() {
+      return request.auth != null &&
+        request.auth.token.role in ["administrador", "operador"];
+    }
+
+    // ---------------------------------------------------------
     // Colección: usuarios/{uid}
     //
     // Lectura: el propio usuario autenticado, o cualquier
@@ -116,10 +128,11 @@ service cloud.firestore {
     //
     // El cliente puede leerlas, pero no puede crearlas.
     //
-    // Se permite actualizar únicamente el campo "estado".
-    // Esto permite, por ejemplo, que el cliente cambie una
-    // alerta de "nueva" a otro estado sin modificar el resto
-    // de sus datos.
+    // Solo un administrador u operador puede actualizar una
+    // alerta (el rol "consulta" es de solo lectura), y
+    // únicamente el campo "estado", que solo puede pasar a
+    // "reconocida" o "resuelta" (ver ALERT_STATUS en
+    // frontend/src/utils/constants.js).
     //
 
     match /alertas/{id} {
@@ -127,29 +140,13 @@ service cloud.firestore {
 
       allow create: if false;
 
-      allow update: if request.auth != null
+      allow update: if isAdminOrOperator()
         && request.resource.data.diff(resource.data)
           .affectedKeys()
-          .hasOnly(["estado"]);
+          .hasOnly(["estado"])
+        && request.resource.data.estado in ["reconocida", "resuelta"];
 
       allow delete: if false;
     }
-
-    // =====================================================
-    // RESTO DE REGLAS DE SPRINT 2
-    // =====================================================
-    //
-    // Mantén aquí las reglas existentes para:
-    // usuarios, incubadoras y dispositivos.
-    //
-    // No es necesario agregar:
-    // estado_dispositivos
-    //
-    // El estado de conexión pertenece a:
-    // dispositivos/{id}
-    //
-    // Las escrituras de procesarMedicion mediante Admin SDK
-    // no pasan por estas reglas.
-    // =====================================================
   }
 }
