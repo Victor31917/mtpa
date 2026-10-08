@@ -21,6 +21,8 @@ const COLECCION_INCUBADORAS = "incubadoras";
 const COLECCION_DISPOSITIVOS = "dispositivos";
 const COLECCION_UMBRALES = "umbrales";
 const COLECCION_ALERTAS = "alertas";
+const COLECCION_VENTILADORES = "ventiladores";
+const COLECCION_ORDENES_VENTILADOR = "ordenes_ventilador";
 
 // Variables ambientales que acepta procesarMedicion. Deben coincidir
 // con ENVIRONMENTAL_VARIABLES de frontend/src/utils/constants.js (ver
@@ -1185,18 +1187,6 @@ exports.notificarAlerta = functions.firestore
     return null;
   });
 
-javascript
-const { onCall, HttpsError } = require("firebase-functions/v2/https");
-const admin = require("firebase-admin");
-
-// Si admin.initializeApp() ya existe en tu archivo,
-// NO lo vuelvas a agregar.
-if (!admin.apps.length) {
-  admin.initializeApp();
-}
-
-const db = admin.firestore();
-
 // ============================================================
 // ENVIAR COMANDO AL VENTILADOR
 // ============================================================
@@ -1211,33 +1201,38 @@ const db = admin.firestore();
 //
 // ============================================================
 
-exports.enviarComandoVentilador = onCall(async (request) => {
+exports.enviarComandoVentilador = functions.https.onCall(async (data, context) => {
   // ----------------------------------------------------------
   // 1. Autorización
   // ----------------------------------------------------------
   //
-  // requireRole ya existe desde Sprint 2.
   // Permite únicamente:
   //   - administrador
   //   - operador
   //
-  requireRole(request, ["administrador", "operador"]);
+  // El rol "consulta" es de solo lectura y queda rechazado.
+  //
+  requireRole(
+    context,
+    ["administrador", "operador"],
+    "Solo un administrador u operador puede enviar comandos a un ventilador."
+  );
 
   // ----------------------------------------------------------
   // 2. Validar datos recibidos
   // ----------------------------------------------------------
 
-  const { ventiladorId, accionSolicitada } = request.data || {};
+  const { ventiladorId, accionSolicitada } = data || {};
 
   if (!ventiladorId || typeof ventiladorId !== "string") {
-    throw new HttpsError(
+    throw new functions.https.HttpsError(
       "invalid-argument",
       "El ventiladorId es obligatorio."
     );
   }
 
   if (!["encender", "apagar"].includes(accionSolicitada)) {
-    throw new HttpsError(
+    throw new functions.https.HttpsError(
       "invalid-argument",
       'accionSolicitada debe ser "encender" o "apagar".'
     );
@@ -1247,14 +1242,16 @@ exports.enviarComandoVentilador = onCall(async (request) => {
   // 3. Verificar que el ventilador exista
   // ----------------------------------------------------------
 
+  const db = admin.firestore();
+
   const ventiladorRef = db
-    .collection("ventiladores")
+    .collection(COLECCION_VENTILADORES)
     .doc(ventiladorId);
 
   const ventiladorSnap = await ventiladorRef.get();
 
   if (!ventiladorSnap.exists) {
-    throw new HttpsError(
+    throw new functions.https.HttpsError(
       "not-found",
       "El ventilador solicitado no existe."
     );
@@ -1279,13 +1276,13 @@ exports.enviarComandoVentilador = onCall(async (request) => {
     ventilador.modoControl !== "mixto"
   ) {
     if (ventilador.modoControl === "automatico") {
-      throw new HttpsError(
+      throw new functions.https.HttpsError(
         "failed-precondition",
         "El ventilador está configurado en modo automático y no admite comandos manuales."
       );
     }
 
-    throw new HttpsError(
+    throw new functions.https.HttpsError(
       "failed-precondition",
       "El modo de control del ventilador no permite comandos manuales."
     );
@@ -1295,12 +1292,12 @@ exports.enviarComandoVentilador = onCall(async (request) => {
   // 5. Crear la orden
   // ----------------------------------------------------------
 
-  const ordenRef = await db.collection("ordenes_ventilador").add({
+  const ordenRef = await db.collection(COLECCION_ORDENES_VENTILADOR).add({
     ventiladorId,
     accionSolicitada,
     origen: "manual",
     estado: "pendiente",
-    solicitadoPor: request.auth.uid,
+    solicitadoPor: context.auth.uid,
     creadaEn: admin.firestore.FieldValue.serverTimestamp(),
   });
 
