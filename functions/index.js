@@ -21,6 +21,8 @@ const COLECCION_INCUBADORAS = "incubadoras";
 const COLECCION_DISPOSITIVOS = "dispositivos";
 const COLECCION_UMBRALES = "umbrales";
 const COLECCION_ALERTAS = "alertas";
+const COLECCION_VENTILADORES = "ventiladores";
+const COLECCION_ORDENES_VENTILADOR = "ordenes_ventilador";
 
 // Variables ambientales que acepta procesarMedicion. Deben coincidir
 // con ENVIRONMENTAL_VARIABLES de frontend/src/utils/constants.js (ver
@@ -1184,4 +1186,154 @@ exports.notificarAlerta = functions.firestore
 
     return null;
   });
+
+// ============================================================
+// ENVIAR COMANDO AL VENTILADOR
+// ============================================================
+//
+// Permite a administradores y operadores autorizados enviar
+// manualmente una orden para encender o apagar un ventilador.
+//
+// La orden NO modifica directamente el ventilador.
+// Se crea en "ordenes_ventilador" con estado "pendiente".
+// El Servicio de Integración será quien ejecute posteriormente
+// la orden.
+//
+// ============================================================
+
+exports.enviarComandoVentilador = functions.https.onCall(async (data, context) => {
+  // ----------------------------------------------------------
+  // 1. Autorización
+  // ----------------------------------------------------------
+  //
+  // Permite únicamente:
+  //   - administrador
+  //   - operador
+  //
+  // El rol "consulta" es de solo lectura y queda rechazado.
+  //
+  requireRole(
+    context,
+    ["administrador", "operador"],
+    "Solo un administrador u operador puede enviar comandos a un ventilador."
+  );
+
+  // ----------------------------------------------------------
+  // 2. Validar datos recibidos
+  // ----------------------------------------------------------
+
+  const { ventiladorId, accionSolicitada } = data || {};
+
+  if (!ventiladorId || typeof ventiladorId !== "string") {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "El ventiladorId es obligatorio."
+    );
+  }
+
+  if (!["encender", "apagar"].includes(accionSolicitada)) {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      'accionSolicitada debe ser "encender" o "apagar".'
+    );
+  }
+
+  // ----------------------------------------------------------
+  // 3. Verificar que el ventilador exista
+  // ----------------------------------------------------------
+
+  const db = admin.firestore();
+
+  const ventiladorRef = db
+    .collection(COLECCION_VENTILADORES)
+    .doc(ventiladorId);
+
+  const ventiladorSnap = await ventiladorRef.get();
+
+  if (!ventiladorSnap.exists) {
+    throw new functions.https.HttpsError(
+      "not-found",
+      "El ventilador solicitado no existe."
+    );
+  }
+
+  const ventilador = ventiladorSnap.data();
+
+  // ----------------------------------------------------------
+  // 4. Validar modo de control
+  // ----------------------------------------------------------
+  //
+  // Se permite control manual cuando el modo es:
+  //   - manual
+  //   - mixto
+  //
+  // En modo automático el cliente no puede enviar órdenes
+  // manuales.
+  //
+
+  if (
+    ventilador.modoControl !== "manual" &&
+    ventilador.modoControl !== "mixto"
+  ) {
+    if (ventilador.modoControl === "automatico") {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "El ventilador está configurado en modo automático y no admite comandos manuales."
+      );
+    }
+
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "El modo de control del ventilador no permite comandos manuales."
+    );
+  }
+
+  // ----------------------------------------------------------
+  // 5. Resolver la incubadora y el dispositivo del ventilador
+  // ----------------------------------------------------------
+  //
+  // El Servicio de Integración necesita incubadoraId y
+  // dispositivoId para armar el tópico MQTT del comando
+  // (ver docs/contrato-mqtt.md), por eso se copian a la orden
+  // desde el documento del ventilador.
+  //
+  const { incubadoraId, dispositivoId } = ventilador;
+
+  if (
+    !incubadoraId ||
+    typeof incubadoraId !== "string" ||
+    !dispositivoId ||
+    typeof dispositivoId !== "string"
+  ) {
+    throw new functions.https.HttpsError(
+      "failed-precondition",
+      "El ventilador no tiene incubadora o dispositivo asociado, por lo que no se puede enviar el comando."
+    );
+  }
+
+  // ----------------------------------------------------------
+  // 6. Crear la orden
+  // ----------------------------------------------------------
+
+  const ordenRef = await db.collection(COLECCION_ORDENES_VENTILADOR).add({
+    ventiladorId,
+    incubadoraId,
+    dispositivoId,
+    accionSolicitada,
+    origen: "manual",
+    estado: "pendiente",
+    solicitadoPor: context.auth.uid,
+    creadaEn: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  // ----------------------------------------------------------
+  // 7. Respuesta
+  // ----------------------------------------------------------
+
+  return {
+    ok: true,
+    ordenId: ordenRef.id,
+    mensaje: "Orden de ventilador creada correctamente.",
+  };
+});
 
