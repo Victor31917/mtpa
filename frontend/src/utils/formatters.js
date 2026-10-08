@@ -4,20 +4,17 @@
 // =========================================================
 
 import {
-  ROLES,
   ROLE_LABELS,
   STATUS,
   INCUBATOR_STATUS,
   DEVICE_STATUS,
   FAN_STATUS,
-  FAN_CONTROL_MODE,
   FAN_CONTROL_MODE_LABELS,
   ALERT_SEVERITY,
   ALERT_SEVERITY_LABELS,
   ALERT_STATUS,
   UNITS,
 } from "./constants";
-
 
 // =========================================================
 // VALOR VACÍO
