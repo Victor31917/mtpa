@@ -1,0 +1,46 @@
+.temperatura-card {
+  background-color: var(--color-surface);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: var(--shadow-sm);
+  border: 2px solid transparent;
+  transition: 0.2s ease;
+}
+
+.temperatura-card--alerta {
+  border-color: var(--color-danger);
+  background-color: var(--color-danger-light);
+}
+
+.temperatura-card__header h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.temperatura-card__content {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 20px 0 10px;
+}
+
+.temperatura-card__valor {
+  font-size: 42px;
+  font-weight: 700;
+}
+
+.temperatura-card__unidad {
+  font-size: 20px;
+}
+
+.temperatura-card__hora {
+  font-size: 14px;
+  color: var(--color-text-secondary);
+}
+
+.temperatura-card__alerta {
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-danger);
+}
