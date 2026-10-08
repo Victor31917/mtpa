@@ -1,0 +1,8 @@
+/* =========================================================
+   M.T.P.A. - TARJETA DE ESTADO DE VENTILADORES
+   La base .dashboard-card está en pages/dashboard/Dashboard.css.
+   ========================================================= */
+
+.dashboard-card--fans .dashboard-card__value {
+  color: var(--color-fan);
+}

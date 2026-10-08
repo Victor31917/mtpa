@@ -15,7 +15,9 @@ const GeneralStatusCard = ({
   dispositivos = [],
 }) => {
   return (
-    <article className="dashboard-card dashboard-card--general">
+    <article
+      className={`dashboard-card dashboard-card--general dashboard-card--estado-${estado}`}
+    >
       <div className="dashboard-card__header">
         <h3>Estado general</h3>
 
