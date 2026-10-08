@@ -20,6 +20,27 @@ incubadora (`incubadoraId`) y del identificador del dispositivo
 | `mtpa/{incubadoraId}/ventiladores/{dispositivoId}/estado`         | Dispositivo → Servicio   | El ventilador reporta su estado actual (encendido/apagado, velocidad).         |
 | `mtpa/{incubadoraId}/dispositivos/{dispositivoId}/latido`         | Dispositivo → Servicio   | Señal de "estoy vivo" (*heartbeat*) enviada periódicamente por cualquier dispositivo. |
 
+## Payload del comando de ventilador
+
+El Servicio de Integración publica en
+`mtpa/{incubadoraId}/ventiladores/{dispositivoId}/comando` (QoS 1) un objeto
+JSON con esta forma, a partir de una orden de `ordenes_ventilador` (ver
+`docs/modelo-datos.md`):
+
+```json
+{
+  "accion": "encender",
+  "ordenId": "Qm3xYz...",
+  "solicitadoEn": "2026-10-01T15:04:05.000Z"
+}
+```
+
+| Campo          | Tipo     | Descripción                                                                 |
+| -------------- | -------- | ------------------------------------------------------------------------------ |
+| `accion`       | `string` | `"encender"` o `"apagar"` (`FAN_ACTIONS.TURN_ON` / `FAN_ACTIONS.TURN_OFF`). El dispositivo lee este campo. `"establecer_velocidad"` (con un campo `velocidad` de 0 a 100) está reservada para una etapa posterior. |
+| `ordenId`      | `string` | Id de la orden en `ordenes_ventilador`; permite correlacionar la confirmación publicada en `.../estado` con la orden. |
+| `solicitadoEn` | `string` | Fecha de creación de la orden (ISO 8601, UTC).                                  |
+
 ## Detección de desconexión
 
 Cada dispositivo debe publicar un mensaje en
@@ -37,10 +58,11 @@ superado.
 
 ## Notas
 
-- El payload exacto de cada mensaje (formato JSON, campos) se especificará
-  junto con la implementación del Servicio de Integración IoT en el Sprint 2.
-  Este documento fija únicamente la convención de nombres de tópicos y la
-  regla de desconexión, que ya forman parte del contrato entre dispositivos
-  y backend.
+- El payload del comando de ventilador está definido arriba. El payload
+  exacto de los demás mensajes (formato JSON, campos) se especificará junto
+  con la implementación del Servicio de Integración IoT en el Sprint 2. Este
+  documento fija la convención de nombres de tópicos, el payload del comando
+  y la regla de desconexión, que ya forman parte del contrato entre
+  dispositivos y backend.
 - Ningún cliente del frontend web publica ni se suscribe a estos tópicos
   directamente; el frontend solo lee el estado ya reflejado en Firestore.
