@@ -304,9 +304,11 @@ export const FAN_SPEED = {
 
 export const COMMAND_STATUS = {
   PENDING: "pendiente",
+  SENDING: "enviando",
   SENT: "enviada",
   EXECUTED: "ejecutada",
   FAILED: "fallida",
+  EXPIRED: "expirada",
 };
 
 
