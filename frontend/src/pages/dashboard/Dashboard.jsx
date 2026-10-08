@@ -259,6 +259,34 @@ const Dashboard = () => {
     [dispositivos]
   );
 
+  // ConnectionStatus: la incubadora se considera conectada si al menos
+  // un dispositivo lo está; la última comunicación es la más reciente.
+  const conexion = useMemo(() => {
+    const conectado = dispositivos.some(
+      (dispositivo) =>
+        dispositivo.estadoConexion ===
+        "conectado"
+    );
+
+    const ultimaComunicacionEn =
+      dispositivos.reduce(
+        (ultima, dispositivo) =>
+          toMillis(
+            dispositivo.ultimaComunicacionEn
+          ) > toMillis(ultima)
+            ? dispositivo.ultimaComunicacionEn
+            : ultima,
+        null
+      );
+
+    return {
+      estadoConexion: conectado
+        ? "conectado"
+        : "desconectado",
+      ultimaComunicacionEn,
+    };
+  }, [dispositivos]);
+
   const estadoGeneral = useMemo(() => {
     if (!incubadoraSeleccionada) {
       return "sin_datos";
@@ -411,7 +439,12 @@ const Dashboard = () => {
 
             {/* [06] Estado de conexión */}
             <ConnectionStatus
-              dispositivos={dispositivos}
+              estadoConexion={
+                conexion.estadoConexion
+              }
+              ultimaComunicacionEn={
+                conexion.ultimaComunicacionEn
+              }
             />
 
             {/* [07] Estado de ventiladores */}
