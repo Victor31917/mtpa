@@ -1000,7 +1000,6 @@ exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
   });
 });
 
-js
 /**
  * Cloud Function trigger: notificarAlerta
  *
