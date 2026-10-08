@@ -53,6 +53,28 @@ adicional de Repository para aislar el acceso a datos:
   cliente nunca escribe directamente en colecciones sensibles como
   `usuarios`; siempre lo hace invocando una Cloud Function callable.
 
+## Variables de entorno de las Cloud Functions
+
+| Variable                    | Usada por           | Descripción                                                                 |
+| --------------------------- | ------------------- | ---------------------------------------------------------------------------- |
+| `INTEGRATION_SERVICE_TOKEN` | `procesarMedicion`  | Token secreto que el Servicio de Integración IoT envía en el encabezado `Authorization: Bearer <token>`. Si no está definido, la función rechaza todas las peticiones. |
+
+`procesarMedicion` es un endpoint HTTPS (no callable) pensado solo para el
+Servicio de Integración IoT, por eso se autentica con este token compartido
+y no con un usuario de Firebase Authentication.
+
+- **Local / emulador**: definirla en `functions/.env` (por ejemplo
+  `INTEGRATION_SERVICE_TOKEN=<token>`). Ese archivo está gitignoreado. Como
+  `functions/.gitignore` también ignora `.env.*`, no se versiona un
+  `.env.example` en `functions/`; esta tabla es la referencia de qué
+  variables hacen falta.
+- **Producción**: definirla en el entorno de despliegue de las funciones
+  (archivo `functions/.env` presente al hacer `firebase deploy`, o el
+  mecanismo de secretos de Firebase), nunca en el repositorio.
+- **Generar un token**: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
+- El mismo valor debe configurarse en el Servicio de Integración IoT como
+  `PROCESAR_MEDICION_TOKEN` (ver `iot-integration-service/.env.example`).
+
 ## Bootstrap del primer administrador
 
 `gestionarUsuario` exige rol `administrador` incluso para crear un
