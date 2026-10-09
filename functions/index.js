@@ -569,19 +569,42 @@ function tokensCoinciden(recibido, esperado) {
   return crypto.timingSafeEqual(hashRecibido, hashEsperado);
 }
 
+// Banda de histéresis para resolver alertas: fracción del rango
+// (maximo - minimo) que el valor debe recuperar, hacia el interior del
+// rango, antes de dar por resuelta una alerta. Evita que un valor que
+// oscila sobre el límite abra y cierre alertas (y envíe un correo) en
+// cada medición. Con 0.05, una alerta "alta" se resuelve cuando
+// valor <= maximo - margen y una "baja" cuando valor >= minimo + margen,
+// con margen = (maximo - minimo) * 0.05.
+const MARGEN_RESOLUCION = 0.05;
+
 /**
- * Evalúa una medición contra el umbral configurado y, si está fuera
- * de rango, genera una alerta.
+ * Evalúa una medición contra el umbral configurado: resuelve las alertas
+ * abiertas cuya condición ya se recuperó y, si el valor está fuera de
+ * rango, genera una alerta.
  *
  * Lee el umbral compuesto "umbrales/{incubadoraId}_{variable}" (campos
- * "minimo" y "maximo"). Si no hay umbral configurado, no hace nada.
+ * "minimo" y "maximo"). Si no hay umbral configurado, o sus límites no
+ * son numéricos, no hace nada.
+ *
+ * En cada medición consulta, con una sola query, las alertas abiertas
+ * (estado "activa" o "reconocida") de la misma incubadora + variable.
+ *
+ * Resolución automática: según el sufijo de "tipo" ("temperatura_alta",
+ * "temperatura_baja", "humedad_alta" o "humedad_baja", ver ALERT_TYPES en
+ * frontend/src/utils/constants.js), una alerta "alta" se resuelve cuando
+ * valor <= maximo - margen y una "baja" cuando valor >= minimo + margen,
+ * donde margen = (maximo - minimo) * MARGEN_RESOLUCION (histéresis: dentro
+ * de esa banda la alerta sigue abierta). Si el rango es inválido
+ * (maximo - minimo <= 0), el margen es 0. Las alertas resueltas se
+ * actualizan en un único batch con estado "resuelta", "resueltaEn",
+ * "resueltaPor" ("sistema") y "valorResolucion".
+ *
  * Para no duplicar alertas mientras la condición se sostiene, no crea
- * una nueva si ya existe una alerta abierta (estado "activa" o
- * "reconocida") para la misma incubadora + variable + tipo
- * ("temperatura_alta", "temperatura_baja", "humedad_alta" o
- * "humedad_baja", ver ALERT_TYPES en frontend/src/utils/constants.js).
- * Una alerta "resuelta" ya no cuenta: si la condición reaparece, se
- * genera una alerta nueva.
+ * una nueva si queda abierta (sin resolver en esta misma llamada) una
+ * alerta del mismo tipo para la misma incubadora + variable. Una alerta
+ * "resuelta" ya no cuenta: si la condición reaparece, se genera una
+ * alerta nueva.
  *
  * No es una Cloud Function: la invoca "procesarMedicion" luego de
  * almacenar la medición, y quien la llama decide qué hacer ante un error.
@@ -593,7 +616,12 @@ function tokensCoinciden(recibido, esperado) {
  * @param {number} medicion.valor
  * @param {string} medicion.unidad
  * @param {FirebaseFirestore.Timestamp} medicion.medidoEn
- * @returns {Promise<{alertaCreada: boolean, alertaId?: string}>}
+ * @returns {Promise<{
+ *   alertaCreada: boolean,
+ *   alertaId?: string,
+ *   alertasResueltas?: string[]
+ * }>} "alertasResueltas" contiene los ids de las alertas resueltas
+ *   (ausente si no hubo umbral válido).
  */
 async function evaluarUmbrales(medicion) {
   const { incubadoraId, dispositivoId, variable, valor, unidad, medidoEn } =
@@ -623,6 +651,57 @@ async function evaluarUmbrales(medicion) {
     return { alertaCreada: false };
   }
 
+  // Alertas abiertas de esta incubadora + variable (una sola query: se
+  // usa tanto para resolver como para evitar duplicados).
+  const alertasAbiertas = await db
+    .collection(COLECCION_ALERTAS)
+    .where("incubadoraId", "==", incubadoraId)
+    .where("variable", "==", variable)
+    .where("estado", "in", ["activa", "reconocida"])
+    .get();
+
+  // Resolución automática con histéresis (ver MARGEN_RESOLUCION).
+  const rango = umbral.maximo - umbral.minimo;
+  const margen = rango > 0 ? rango * MARGEN_RESOLUCION : 0;
+
+  const alertasPorResolver = [];
+  const tiposAbiertos = new Set();
+
+  alertasAbiertas.forEach((alertaDoc) => {
+    const tipoAlerta = alertaDoc.data().tipo;
+
+    const recuperada =
+      (typeof tipoAlerta === "string" &&
+        tipoAlerta.endsWith("_alta") &&
+        valor <= umbral.maximo - margen) ||
+      (typeof tipoAlerta === "string" &&
+        tipoAlerta.endsWith("_baja") &&
+        valor >= umbral.minimo + margen);
+
+    if (recuperada) {
+      alertasPorResolver.push(alertaDoc);
+    } else {
+      tiposAbiertos.add(tipoAlerta);
+    }
+  });
+
+  if (alertasPorResolver.length > 0) {
+    const batch = db.batch();
+
+    alertasPorResolver.forEach((alertaDoc) => {
+      batch.update(alertaDoc.ref, {
+        estado: "resuelta",
+        resueltaEn: admin.firestore.FieldValue.serverTimestamp(),
+        resueltaPor: "sistema",
+        valorResolucion: valor,
+      });
+    });
+
+    await batch.commit();
+  }
+
+  const alertasResueltas = alertasPorResolver.map((alertaDoc) => alertaDoc.id);
+
   let sentido;
   let limite;
 
@@ -633,22 +712,15 @@ async function evaluarUmbrales(medicion) {
     sentido = "baja";
     limite = umbral.minimo;
   } else {
-    return { alertaCreada: false };
+    return { alertaCreada: false, alertasResueltas };
   }
 
   const tipo = `${variable}_${sentido}`;
 
-  const alertaExistente = await db
-    .collection(COLECCION_ALERTAS)
-    .where("incubadoraId", "==", incubadoraId)
-    .where("variable", "==", variable)
-    .where("tipo", "==", tipo)
-    .where("estado", "in", ["activa", "reconocida"])
-    .limit(1)
-    .get();
-
-  if (!alertaExistente.empty) {
-    return { alertaCreada: false };
+  // Si queda una alerta abierta del mismo tipo (no resuelta en esta
+  // misma llamada), la condición ya está notificada: no se duplica.
+  if (tiposAbiertos.has(tipo)) {
+    return { alertaCreada: false, alertasResueltas };
   }
 
   const etiqueta = variable.charAt(0).toUpperCase() + variable.slice(1);
@@ -671,7 +743,7 @@ async function evaluarUmbrales(medicion) {
     creadaEn: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  return { alertaCreada: true, alertaId: alertaRef.id };
+  return { alertaCreada: true, alertaId: alertaRef.id, alertasResueltas };
 }
 
 /**
