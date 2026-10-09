@@ -20,6 +20,16 @@ const MODOS = Object.values(FAN_CONTROL_MODE);
 // Margen de histéresis mínimo que acepta la Cloud Function.
 const MARGEN_MINIMO = 0.01;
 
+// Campos cuya validez depende uno del otro (el margen debe ser menor que el
+// umbral): al editar uno se revalida el otro.
+const CAMPOS_RELACIONADOS = ["umbralActivacion", "margenHisteresis"];
+
+const ERROR_AUTOMATICO_INACTIVO =
+  "En modo automático la regla debe estar activa. Elija el modo Mixto si desea dejarla inactiva.";
+
+const ERROR_UMBRAL_NO_POSITIVO =
+  "El umbral de activación debe ser positivo y mayor que el margen.";
+
 const DESCRIPCION_MODO = {
   [FAN_CONTROL_MODE.MANUAL]: "Solo se aceptan comandos manuales.",
   [FAN_CONTROL_MODE.AUTOMATIC]:
@@ -89,12 +99,27 @@ const validar = (formulario) => {
     errores.variable = "Elija la variable que dispara la regla.";
   }
 
-  if (!esNumeroFinito(formulario.umbralActivacion)) {
+  const umbralValido = esNumeroFinito(formulario.umbralActivacion);
+  const margenValido = esNumeroFinito(formulario.margenHisteresis);
+  const umbral = Number(formulario.umbralActivacion);
+  const margen = Number(formulario.margenHisteresis);
+
+  if (!umbralValido) {
     errores.umbralActivacion = "Ingrese un umbral numérico.";
+  } else if (umbral <= 0) {
+    // Un umbral que no es positivo no admite ningún margen válido: se avisa en
+    // el umbral, igual que la Cloud Function.
+    errores.umbralActivacion = ERROR_UMBRAL_NO_POSITIVO;
   }
 
-  if (!esNumeroFinito(formulario.margenHisteresis)) {
+  if (!margenValido) {
     errores.margenHisteresis = "Ingrese un margen numérico.";
+  } else if (margen <= 0) {
+    errores.margenHisteresis = "El margen debe ser mayor que 0.";
+  } else if (margen < MARGEN_MINIMO) {
+    errores.margenHisteresis = "El margen mínimo es 0,01.";
+  } else if (umbralValido && umbral > 0 && margen >= umbral) {
+    errores.margenHisteresis = "El margen debe ser menor que el umbral.";
   }
 
   // En modo automático los comandos manuales se rechazan: con la regla
@@ -103,23 +128,7 @@ const validar = (formulario) => {
     formulario.modoControl === FAN_CONTROL_MODE.AUTOMATIC &&
     !formulario.activa
   ) {
-    errores.activa =
-      "En modo automático la regla debe estar activa. Elija el modo Mixto si desea dejarla inactiva.";
-  }
-
-  if (errores.variable || errores.umbralActivacion || errores.margenHisteresis) {
-    return errores;
-  }
-
-  const umbral = Number(formulario.umbralActivacion);
-  const margen = Number(formulario.margenHisteresis);
-
-  if (margen <= 0) {
-    errores.margenHisteresis = "El margen debe ser mayor que 0.";
-  } else if (margen < MARGEN_MINIMO) {
-    errores.margenHisteresis = "El margen mínimo es 0,01.";
-  } else if (margen >= umbral) {
-    errores.margenHisteresis = "El margen debe ser menor que el umbral.";
+    errores.activa = ERROR_AUTOMATICO_INACTIVO;
   }
 
   return errores;
@@ -143,25 +152,37 @@ const armarDatos = (ventiladorId, formulario) => {
   };
 };
 
-// Estado de edición después de cambiar un campo del formulario. Al cambiar de
-// modo los errores de la regla dejan de aplicar: en manual la regla no se
-// valida y el error de "activa" depende del modo.
+// Estado de edición después de cambiar un campo del formulario.
+// - En modo manual la regla no se valida: no queda ningún error.
+// - El aviso de "automático requiere regla activa" aparece apenas se da esa
+//   combinación (al elegir el modo o al desmarcar la regla).
+// - Umbral y margen se revalidan juntos: un error que ya se había mostrado se
+//   actualiza (o desaparece) al corregir cualquiera de los dos, y el otro campo
+//   se marca si ya tiene un valor que no cuadra con el que se acaba de editar.
 const aplicarCambio = (previo, campo, valor) => {
-  let errores = { ...previo.errores, [campo]: undefined };
+  const formulario = { ...previo.formulario, [campo]: valor };
 
-  if (campo === "modoControl") {
-    errores =
-      valor === FAN_CONTROL_MODE.MANUAL
-        ? {}
-        : { ...errores, activa: undefined };
+  if (formulario.modoControl === FAN_CONTROL_MODE.MANUAL) {
+    return { ...previo, formulario, errores: {}, feedback: null };
   }
 
-  return {
-    ...previo,
-    formulario: { ...previo.formulario, [campo]: valor },
-    errores,
-    feedback: null,
-  };
+  const fresco = validar(formulario);
+  const errores = { ...previo.errores, [campo]: undefined };
+
+  if (campo === "modoControl" || campo === "activa") {
+    errores.activa = fresco.activa;
+  }
+
+  if (campo === "modoControl" || CAMPOS_RELACIONADOS.includes(campo)) {
+    for (const clave of CAMPOS_RELACIONADOS) {
+      const yaMarcado = Boolean(previo.errores[clave]);
+      const otroConValor = clave !== campo && formulario[clave].trim() !== "";
+
+      errores[clave] = yaMarcado || otroConValor ? fresco[clave] : undefined;
+    }
+  }
+
+  return { ...previo, formulario, errores, feedback: null };
 };
 
 // Mensaje legible para el error de la callable. Los errores de validación y de
