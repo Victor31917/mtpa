@@ -191,14 +191,15 @@ la afecta.
 Representa un ventilador de una incubadora. Es el documento que lee la Cloud
 Function `enviarComandoVentilador` antes de crear una orden. Ningún cliente lo
 escribe (ver `firestore.rules`): lo crea la Cloud Function `crearDispositivo` y
-el estado lo actualiza el Servicio de Integración IoT con Admin SDK.
+está previsto que el Servicio de Integración IoT actualice el estado con Admin
+SDK (Sprint 4, tarea [10]; hoy nada lo escribe).
 
 | Campo          | Tipo     | Descripción                                                                 |
 | -------------- | -------- | ------------------------------------------------------------------------------ |
 | `incubadoraId` | `string` | Incubadora a la que pertenece (`incubadoras/{id}`). Se copia a cada orden.      |
 | `dispositivoId`| `string` | Dispositivo físico asociado (`dispositivos/{id}`, tipo `ventilador`). Junto con `incubadoraId` arma el tópico MQTT del comando (ver `docs/contrato-mqtt.md`). Se copia a cada orden. |
 | `modoControl`  | `string` | Uno de los valores de `FAN_CONTROL_MODE` (`manual`, `automatico`, `mixto`). `enviarComandoVentilador` solo acepta comandos manuales en `manual` y `mixto`. Nace en `manual`. |
-| `estadoActual` | `string \| null` | Uno de los valores de `FAN_STATUS` (`encendido`, `apagado`). Nace en `null` (estado desconocido) y lo escribe el Servicio de Integración al recibir la confirmación del dispositivo. |
+| `estadoActual` | `string \| null` | Uno de los valores de `FAN_STATUS` (`encendido`, `apagado`). Nace en `null` (estado desconocido). Está previsto que el Servicio de Integración lo escriba al recibir la confirmación del dispositivo (Sprint 4, tarea [10]); hoy nada lo escribe, así que permanece en `null`. |
 | `creadoEn`     | `timestamp` | Fecha de creación (server timestamp).                                       |
 
 ### Cómo se crean estos documentos
@@ -226,15 +227,26 @@ el estado lo actualiza el Servicio de Integración IoT con Admin SDK.
   GOOGLE_APPLICATION_CREDENTIALS="/ruta/a/service-account.json" \
   node scripts/crear-documentos-ventiladores.js --dry-run
 
-  # 2. Ejecución real.
+  # 2. Revisar el proyecto impreso y el informe; recién entonces, ejecución real.
   GOOGLE_APPLICATION_CREDENTIALS="/ruta/a/service-account.json" \
-  node scripts/crear-documentos-ventiladores.js
+  node scripts/crear-documentos-ventiladores.js --confirmar
   ```
 
+  El script exige indicar exactamente uno de los dos modos (`--dry-run` o
+  `--confirmar`): sin ninguno, con un argumento desconocido (por ejemplo un
+  error de tipeo como `--dryrun`) o con ambos, se niega a correr y termina con
+  código 2, sin escribir nada.
+
+  Lo primero que imprime es `Proyecto de Firebase: <id>`: es el `project_id` de
+  la cuenta de servicio apuntada por `GOOGLE_APPLICATION_CREDENTIALS`, es decir,
+  el proyecto donde se va a escribir. Hay que verificar que sea el del entorno
+  deseado antes de ejecutar con `--confirmar`. Si no se puede leer el
+  `project_id` de esa clave, termina con código 2.
+
   Al final imprime un resumen (encontrados, creados, ya existían, omitidos y
-  errores) y termina con código distinto de 0 si hubo errores. Un dispositivo
-  ventilador sin `incubadoraId` válido se omite y se informa. Las credenciales
-  se obtienen como en `docs/bootstrap-admin.md`.
+  errores) y termina con código 1 si hubo errores. Un dispositivo ventilador
+  sin `incubadoraId` válido se omite y se informa. Las credenciales se
+  obtienen como en `docs/bootstrap-admin.md`.
 
 ## `ordenes_ventilador/{ordenId}` (Sprint 4)
 
