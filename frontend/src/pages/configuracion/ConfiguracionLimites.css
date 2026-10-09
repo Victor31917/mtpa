@@ -1,0 +1,89 @@
+/* =========================================================
+   M.T.P.A. - CONFIGURACIÓN DE LÍMITES (UMBRALES)
+   La estructura de página, tarjetas, formularios y mensajes
+   sale de las utilidades de global.css; aquí solo lo propio.
+   ========================================================= */
+
+.limites-page {
+  max-width: var(--content-max-width);
+}
+
+.limites-selector {
+  max-width: 420px;
+  margin-bottom: var(--spacing-6);
+}
+
+.limites-estado {
+  padding: var(--spacing-8);
+
+  color: var(--color-text-secondary);
+
+  text-align: center;
+}
+
+.limites-mensaje {
+  margin-bottom: var(--spacing-4);
+}
+
+.limites-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.limites-campos {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+
+  gap: var(--spacing-4);
+}
+
+.limites-campos .form-group {
+  margin-bottom: 0;
+}
+
+.limites-btn-guardar {
+  padding: var(--spacing-3) var(--spacing-5);
+
+  color: var(--color-text-light);
+  background-color: var(--color-primary);
+
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+
+  cursor: pointer;
+
+  transition: background-color var(--transition-fast);
+}
+
+.limites-btn-guardar:hover:not(:disabled) {
+  background-color: var(--color-primary-hover);
+}
+
+.limites-btn-guardar:focus-visible {
+  outline: none;
+
+  box-shadow: var(--focus-ring);
+}
+
+.limites-btn-guardar:disabled {
+  opacity: 0.7;
+
+  cursor: not-allowed;
+}
+
+@media (max-width: 576px) {
+  .limites-selector {
+    max-width: none;
+  }
+
+  .limites-campos {
+    grid-template-columns: 1fr;
+  }
+
+  .limites-btn-guardar {
+    width: 100%;
+  }
+}

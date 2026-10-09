@@ -8,6 +8,7 @@ import Dashboard from "../pages/dashboard/Dashboard";
 import Incubadoras from "../pages/incubadoras/Incubadoras";
 import IncubadoraDetalle from "../pages/incubadoras/IncubadoraDetalle";
 import IncubadoraForm from "../pages/incubadoras/IncubadoraForm";
+import ConfiguracionLimites from "../pages/configuracion/ConfiguracionLimites";
 import Usuarios from "../pages/usuarios/Usuarios";
 import UsuarioForm from "../pages/usuarios/UsuarioForm";
 import NotFound from "../pages/errors/NotFound";
@@ -26,7 +27,8 @@ import { ROLES, ROUTES } from "../utils/constants";
 // - Rutas públicas: envueltas en AuthLayout (solo "/login"
 //   por ahora).
 // - Rutas protegidas: exigen sesión activa (ProtectedRoute).
-// - "/usuarios" además exige rol "administrador" (RoleRoute).
+// - "/usuarios", la gestión de incubadoras y "/configuracion/limites"
+//   además exigen rol "administrador" (RoleRoute).
 //
 // Nota: Dashboard.jsx, DashboardLayout.jsx, NotFound.jsx y
 // Unauthorized.jsx se agregan aquí como placeholders mínimos
@@ -64,6 +66,11 @@ const AppRoutes = () => {
             <Route
               path={ROUTES.INCUBATOR_EDIT}
               element={<IncubadoraForm />}
+            />
+
+            <Route
+              path={ROUTES.THRESHOLDS}
+              element={<ConfiguracionLimites />}
             />
           </Route>
         </Route>
