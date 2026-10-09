@@ -1,0 +1,145 @@
+/* =========================================================
+   M.T.P.A. - FORMULARIO DE AUTOMATIZACIÓN DE VENTILADORES
+   La estructura de página, tarjeta, formularios y mensajes
+   salen de las utilidades de global.css; aquí solo lo propio.
+   ========================================================= */
+
+.automatizacion-page {
+  max-width: 800px;
+}
+
+.automatizacion__volver {
+  display: inline-block;
+
+  margin-bottom: var(--spacing-5);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+
+  text-decoration: none;
+}
+
+.automatizacion__volver:hover {
+  text-decoration: underline;
+}
+
+.automatizacion-estado {
+  padding: var(--spacing-8);
+
+  color: var(--color-text-secondary);
+
+  text-align: center;
+}
+
+.automatizacion-mensaje {
+  margin-bottom: var(--spacing-4);
+}
+
+.automatizacion-selectores {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+
+  gap: var(--spacing-4);
+
+  margin-bottom: var(--spacing-2);
+}
+
+.automatizacion-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.automatizacion-regla {
+  min-width: 0;
+  margin: 0 0 var(--spacing-4);
+  padding: var(--spacing-4);
+
+  border: var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.automatizacion-regla:disabled {
+  background-color: var(--color-background-secondary);
+}
+
+.automatizacion-regla__titulo {
+  padding: 0 var(--spacing-2);
+
+  color: var(--color-heading);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.automatizacion-regla__nota {
+  margin-bottom: var(--spacing-4);
+
+  font-size: var(--font-size-sm);
+}
+
+.automatizacion-campos {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+
+  gap: var(--spacing-4);
+}
+
+.automatizacion-activa {
+  display: inline-flex;
+  align-items: center;
+
+  gap: var(--spacing-2);
+
+  color: var(--color-text-primary);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.automatizacion-activa input {
+  accent-color: var(--color-primary);
+}
+
+.automatizacion-btn-guardar {
+  padding: var(--spacing-3) var(--spacing-5);
+
+  color: var(--color-text-light);
+  background-color: var(--color-primary);
+
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+
+  cursor: pointer;
+
+  transition: background-color var(--transition-fast);
+}
+
+.automatizacion-btn-guardar:hover:not(:disabled) {
+  background-color: var(--color-primary-hover);
+}
+
+.automatizacion-btn-guardar:focus-visible {
+  outline: none;
+
+  box-shadow: var(--focus-ring);
+}
+
+.automatizacion-btn-guardar:disabled {
+  opacity: 0.7;
+
+  cursor: not-allowed;
+}
+
+@media (max-width: 576px) {
+  .automatizacion-selectores,
+  .automatizacion-campos {
+    grid-template-columns: 1fr;
+  }
+
+  .automatizacion-btn-guardar {
+    width: 100%;
+  }
+}
