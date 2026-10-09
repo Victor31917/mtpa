@@ -12,6 +12,7 @@
 
 import {
   collection,
+  limit,
   onSnapshot,
   orderBy,
   query,
@@ -38,18 +39,29 @@ import { COLLECTIONS } from "../utils/constants";
  * @param {(ordenes: Object[]) => void} onCambio Se invoca con la
  * lista actualizada de órdenes cada vez que cambia algo en Firestore.
  * @param {(error: Error) => void} [onError]
+ * @param {number} [limite] Cantidad máxima de órdenes (las más recientes).
+ * Sin este argumento se leen todas. Usa el mismo índice compuesto.
  * @returns {() => void} Función "unsubscribe": hay que invocarla en el
  * cleanup del efecto que la usa para no dejar el listener colgado.
  */
 export const suscribirseAOrdenesPorVentilador = (
   ventiladorId,
   onCambio,
-  onError
+  onError,
+  limite
 ) => {
+  const restricciones = [
+    where("ventiladorId", "==", ventiladorId),
+    orderBy("creadaEn", "desc"),
+  ];
+
+  if (Number.isInteger(limite) && limite > 0) {
+    restricciones.push(limit(limite));
+  }
+
   const referencia = query(
     collection(db, COLLECTIONS.FAN_COMMANDS),
-    where("ventiladorId", "==", ventiladorId),
-    orderBy("creadaEn", "desc")
+    ...restricciones
   );
 
   return onSnapshot(

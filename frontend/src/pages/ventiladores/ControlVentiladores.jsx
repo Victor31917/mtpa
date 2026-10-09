@@ -13,7 +13,7 @@ import {
   MESSAGES,
   ROUTES,
 } from "../../utils/constants";
-import { formatDateTime } from "../../utils/dateUtils";
+import { formatDateTime, toDate } from "../../utils/dateUtils";
 import {
   formatFanControlMode,
   formatFanStatus,
@@ -22,38 +22,53 @@ import {
 import { canControlFans, canManageAutomation } from "../../utils/permissions";
 import "./ControlVentiladores.css";
 
+// Tiempo máximo que una orden "en curso" bloquea los botones. Una orden sana
+// termina antes: se descarta a los 60 s si no salió, y una vez enviada se
+// espera la confirmación hasta 30 s más. Se agrega un margen. Pasado este
+// tiempo la orden se muestra como atascada y se vuelve a permitir enviar.
+const ORDEN_EN_CURSO_MAX_MS = 120 * 1000;
+
+// Órdenes más recientes que se leen por ventilador (solo hace falta la
+// última; unas pocas más permiten reconocer la que se acaba de crear).
+const ORDENES_LEIDAS = 5;
+
+// Cada cuánto se actualiza el reloj mientras haya una orden en curso, para
+// rehabilitar los botones cuando una orden pasa a atascada.
+const INTERVALO_RELOJ_MS = 5 * 1000;
+
 // Texto y variante visual de cada estado de una orden (COMMAND_STATUS).
 // La variante es una de las de global.css (.status--*, .message--*).
 const ESTADOS_ORDEN = {
   [COMMAND_STATUS.PENDING]: {
     etiqueta: "Pendiente",
     variante: "info",
-    descripcion: "A la espera de que el servicio de integración la tome.",
+    descripcion: "En cola, esperando su envío al ventilador.",
   },
   [COMMAND_STATUS.SENDING]: {
     etiqueta: "Enviando",
     variante: "info",
-    descripcion: "El servicio de integración la está publicando.",
+    descripcion: "Enviando la orden al ventilador.",
   },
   [COMMAND_STATUS.SENT]: {
     etiqueta: "Enviada",
     variante: "info",
-    descripcion: "Publicada; falta la confirmación del dispositivo.",
+    descripcion: "Orden enviada; esperando la confirmación del ventilador.",
   },
   [COMMAND_STATUS.EXECUTED]: {
     etiqueta: "Ejecutada",
     variante: "success",
-    descripcion: "El dispositivo confirmó el cambio.",
+    descripcion: "El ventilador confirmó el cambio.",
   },
   [COMMAND_STATUS.FAILED]: {
     etiqueta: "Fallida",
     variante: "danger",
-    descripcion: "La orden no pudo enviarse al dispositivo.",
+    descripcion: "La orden no pudo completarse. Inténtelo nuevamente.",
   },
   [COMMAND_STATUS.EXPIRED]: {
     etiqueta: "Expirada",
     variante: "warning",
-    descripcion: "No se envió a tiempo y se descartó.",
+    descripcion:
+      "La orden no se envió a tiempo y se descartó. Inténtelo nuevamente.",
   },
 };
 
@@ -63,10 +78,22 @@ const ESTADO_ORDEN_DESCONOCIDO = {
   descripcion: "",
 };
 
-// Una orden en estos estados todavía no salió hacia el dispositivo: mientras
-// tanto no se admite otro comando. "enviada" no bloquea porque la confirmación
-// ("ejecutada") puede no llegar nunca y el panel quedaría inutilizable.
-const ESTADOS_ORDEN_EN_CURSO = [COMMAND_STATUS.PENDING, COMMAND_STATUS.SENDING];
+// Una orden que lleva demasiado tiempo en curso (ORDEN_EN_CURSO_MAX_MS) se
+// presenta aparte de las demás, en variante de advertencia.
+const ESTADO_ORDEN_ATASCADA = {
+  etiqueta: "Atascada",
+  variante: "warning",
+  descripcion:
+    "La orden sigue sin confirmarse. Verifique el ventilador antes de volver a intentarlo.",
+};
+
+// Una orden en estos estados todavía no terminó: mientras sea reciente no se
+// admite otro comando.
+const ESTADOS_ORDEN_EN_CURSO = [
+  COMMAND_STATUS.PENDING,
+  COMMAND_STATUS.SENDING,
+  COMMAND_STATUS.SENT,
+];
 
 // Estados terminales con error: se muestran en un bloque aparte para que no
 // se confundan con una orden que sigue su curso.
@@ -79,6 +106,19 @@ const ETIQUETAS_ACCION = {
 
 const obtenerEstadoOrden = (estado) =>
   ESTADOS_ORDEN[estado] ?? ESTADO_ORDEN_DESCONOCIDO;
+
+// Milisegundos desde que se creó la orden. Sin "creadaEn" (por ejemplo, el
+// server timestamp todavía pendiente) se la considera recién creada.
+const edadDeOrden = (orden, ahora) => {
+  const creada = toDate(orden?.creadaEn);
+
+  return creada ? ahora - creada.getTime() : 0;
+};
+
+// Orden en curso que superó el tiempo máximo sin terminar.
+const estaAtascada = (orden, ahora) =>
+  ESTADOS_ORDEN_EN_CURSO.includes(orden?.estado) &&
+  edadDeOrden(orden, ahora) >= ORDEN_EN_CURSO_MAX_MS;
 
 // "estadoActual" es null hasta que el dispositivo confirma un estado: se
 // muestra como "Desconocido", nunca como "Apagado".
@@ -96,37 +136,48 @@ const obtenerEstadoVentilador = (estadoActual) => {
 
 // Indica si hay un comando en curso desde esta pantalla, para evitar el doble
 // envío: la llamada a la callable sigue en vuelo, la orden recién creada
-// todavía no llegó por la suscripción (la última orden sigue siendo la de
-// antes de enviar) o la última orden aún no salió hacia el dispositivo.
+// ("ordenEsperada") todavía no llegó por la suscripción, o la última orden aún
+// no terminó y es reciente.
 const hayOrdenEnCurso = ({
   accionEnCurso,
-  ordenPrevia,
-  errorOrdenes,
+  ordenEsperada,
+  ordenes,
   ultima,
+  ahora,
 }) => {
   if (accionEnCurso !== "") {
     return true;
   }
 
   if (
-    ordenPrevia !== undefined &&
-    !errorOrdenes &&
-    (ultima?.id ?? null) === ordenPrevia
+    ordenEsperada &&
+    !ordenes.some((orden) => orden.id === ordenEsperada.id) &&
+    ahora - ordenEsperada.desde < ORDEN_EN_CURSO_MAX_MS
   ) {
     return true;
   }
 
-  return ESTADOS_ORDEN_EN_CURSO.includes(ultima?.estado);
+  return (
+    ESTADOS_ORDEN_EN_CURSO.includes(ultima?.estado) &&
+    !estaAtascada(ultima, ahora)
+  );
 };
 
 // Decide si los botones de encender/apagar están habilitados y, si no, por
 // qué. Los comandos manuales solo se admiten en modo manual o mixto (igual
-// que la Cloud Function) y solo a quien tiene permiso de control.
-const evaluarControl = ({ modoControl, puedeControlar, ordenEnCurso }) => {
+// que la Cloud Function) y solo a quien tiene permiso de control. Mientras no
+// se sepa cuál es la última orden (cargando o con error) no se permite enviar.
+const evaluarControl = ({
+  modoControl,
+  puedeControlar,
+  cargandoOrdenes,
+  errorOrdenes,
+  ordenEnCurso,
+}) => {
   if (!puedeControlar) {
     return {
       habilitado: false,
-      motivo: "Su rol solo permite consultar el estado de los ventiladores.",
+      motivo: "Su rol no permite enviar comandos a los ventiladores.",
     };
   }
 
@@ -145,6 +196,21 @@ const evaluarControl = ({ modoControl, puedeControlar, ordenEnCurso }) => {
     return {
       habilitado: false,
       motivo: "El modo de control del ventilador no permite comandos manuales.",
+    };
+  }
+
+  if (errorOrdenes) {
+    return {
+      habilitado: false,
+      motivo:
+        "No se pudieron consultar las órdenes de este ventilador, por eso no se pueden enviar comandos. Recargue la página para reintentar.",
+    };
+  }
+
+  if (cargandoOrdenes) {
+    return {
+      habilitado: false,
+      motivo: "Consultando las órdenes del ventilador...",
     };
   }
 
@@ -186,7 +252,7 @@ const mensajeDeErrorAlEnviar = (err) => {
   return "No fue posible enviar el comando. Inténtalo nuevamente.";
 };
 
-const UltimaOrden = ({ cargando, error, orden }) => {
+const UltimaOrden = ({ cargando, error, orden, ahora }) => {
   if (cargando) {
     return <p className="ventiladores-orden__texto">{MESSAGES.LOADING}</p>;
   }
@@ -205,8 +271,11 @@ const UltimaOrden = ({ cargando, error, orden }) => {
     );
   }
 
-  const estado = obtenerEstadoOrden(orden.estado);
-  const falla = ESTADOS_ORDEN_FALLIDOS.includes(orden.estado);
+  const atascada = estaAtascada(orden, ahora);
+  const estado = atascada
+    ? ESTADO_ORDEN_ATASCADA
+    : obtenerEstadoOrden(orden.estado);
+  const aparte = atascada || ESTADOS_ORDEN_FALLIDOS.includes(orden.estado);
   const accion = ETIQUETAS_ACCION[orden.accionSolicitada] ?? "-";
 
   return (
@@ -215,20 +284,16 @@ const UltimaOrden = ({ cargando, error, orden }) => {
         {accion} · {formatDateTime(orden.creadaEn)}
       </p>
 
-      {falla ? (
+      {aparte ? (
+        // El detalle técnico de la orden (si lo hay) queda solo en el title.
         <div
           className={`message message--${estado.variante} ventiladores-orden__falla`}
           role="alert"
+          title={orden.error || undefined}
         >
           <div>
             <strong>{estado.etiqueta}</strong>
             <p className="ventiladores-orden__detalle">{estado.descripcion}</p>
-
-            {orden.error && (
-              <p className="ventiladores-orden__detalle">
-                Motivo: {orden.error}
-              </p>
-            )}
           </div>
         </div>
       ) : (
@@ -248,68 +313,102 @@ const UltimaOrden = ({ cargando, error, orden }) => {
 
 const TarjetaVentilador = ({
   ventilador,
-  numero,
   puedeControlar,
   puedeAutomatizar,
 }) => {
   const { id } = ventilador;
 
+  // El ventilador se identifica por su dispositivo, no por su posición en el
+  // listado (que cambia si se agregan o quitan ventiladores).
+  const nombre = `Ventilador ${formatShortId(ventilador.dispositivoId || id)}`;
+
   // Las órdenes se guardan junto al ventilador al que pertenecen: mientras
   // no coincida se considera "cargando" (sin resetear estado en el efecto).
-  const [ordenes, setOrdenes] = useState({ id: null, ultima: null, error: "" });
+  const [ordenes, setOrdenes] = useState({ id: null, lista: [], error: "" });
   const [accionEnCurso, setAccionEnCurso] = useState("");
   const [errorAccion, setErrorAccion] = useState("");
 
-  // Id de la última orden conocida al momento de enviar un comando, hasta que
-  // la nueva orden aparezca en la suscripción (undefined = no se espera nada).
-  const [ordenPrevia, setOrdenPrevia] = useState(undefined);
+  // Orden recién creada por esta pantalla ({ id, desde }) hasta que aparezca
+  // en la suscripción.
+  const [ordenEsperada, setOrdenEsperada] = useState(null);
+
+  // Reloj para decidir cuándo una orden en curso pasa a atascada.
+  const [ahora, setAhora] = useState(() => Date.now());
 
   useEffect(() => {
     const unsubscribe = ordenesRepository.suscribirseAOrdenesPorVentilador(
       id,
       (lista) => {
-        setOrdenes({ id, ultima: lista[0] ?? null, error: "" });
+        setAhora(Date.now());
+        setOrdenes({ id, lista, error: "" });
       },
       (err) => {
         console.error("Error al leer las órdenes del ventilador:", err);
         setOrdenes({
           id,
-          ultima: null,
+          lista: [],
           error: "No fue posible cargar las órdenes del ventilador.",
         });
-      }
+      },
+      ORDENES_LEIDAS
     );
 
     return unsubscribe;
   }, [id]);
 
   const cargandoOrdenes = ordenes.id !== id;
-  const ultima = cargandoOrdenes ? null : ordenes.ultima;
+  const lista = cargandoOrdenes ? [] : ordenes.lista;
+  const ultima = lista[0] ?? null;
+
+  const necesitaReloj =
+    ordenEsperada !== null || ESTADOS_ORDEN_EN_CURSO.includes(ultima?.estado);
+
+  useEffect(() => {
+    if (!necesitaReloj) {
+      return undefined;
+    }
+
+    const intervalo = setInterval(
+      () => setAhora(Date.now()),
+      INTERVALO_RELOJ_MS
+    );
+
+    return () => clearInterval(intervalo);
+  }, [necesitaReloj]);
 
   const { habilitado, motivo } = evaluarControl({
     modoControl: ventilador.modoControl,
     puedeControlar,
+    cargandoOrdenes,
+    errorOrdenes: cargandoOrdenes ? "" : ordenes.error,
     ordenEnCurso: hayOrdenEnCurso({
       accionEnCurso,
-      ordenPrevia,
-      errorOrdenes: ordenes.error,
+      ordenEsperada,
+      ordenes: lista,
       ultima,
+      ahora,
     }),
   });
 
+  const idMotivo = `ventilador-${id}-motivo`;
+
   const handleComando = async (accion) => {
     if (!habilitado) return;
-
-    const previa = ultima?.id ?? null;
 
     try {
       setAccionEnCurso(accion);
       setErrorAccion("");
 
       // La orden nueva llega a la pantalla por la suscripción en tiempo real.
-      await ventiladoresRepository.enviarComando(id, accion);
+      const resultado = await ventiladoresRepository.enviarComando(id, accion);
 
-      setOrdenPrevia(previa);
+      const instante = Date.now();
+
+      setAhora(instante);
+
+      if (resultado?.ordenId) {
+        setOrdenEsperada({ id: resultado.ordenId, desde: instante });
+      }
     } catch (err) {
       console.error("No fue posible enviar el comando:", err);
       setErrorAccion(mensajeDeErrorAlEnviar(err));
@@ -323,10 +422,7 @@ const TarjetaVentilador = ({
   return (
     <article className="card ventiladores-card">
       <header className="card__header">
-        <div>
-          <h2 className="card__title">Ventilador {numero}</h2>
-          <p className="card__subtitle">ID: {formatShortId(id)}</p>
-        </div>
+        <h2 className="card__title">{nombre}</h2>
 
         <span
           className={`ventiladores-estado-actual ventiladores-estado-actual--${estadoVentilador.clase}`}
@@ -347,8 +443,9 @@ const TarjetaVentilador = ({
 
         <UltimaOrden
           cargando={cargandoOrdenes}
-          error={ordenes.error}
+          error={cargandoOrdenes ? "" : ordenes.error}
           orden={ultima}
+          ahora={ahora}
         />
       </section>
 
@@ -364,6 +461,8 @@ const TarjetaVentilador = ({
           className="ventiladores-btn ventiladores-btn--encender"
           onClick={() => handleComando(FAN_ACTIONS.TURN_ON)}
           disabled={!habilitado}
+          aria-label={`Encender ${nombre.toLowerCase()}`}
+          aria-describedby={habilitado ? undefined : idMotivo}
         >
           {accionEnCurso === FAN_ACTIONS.TURN_ON ? "Enviando..." : "Encender"}
         </button>
@@ -373,12 +472,18 @@ const TarjetaVentilador = ({
           className="ventiladores-btn ventiladores-btn--apagar"
           onClick={() => handleComando(FAN_ACTIONS.TURN_OFF)}
           disabled={!habilitado}
+          aria-label={`Apagar ${nombre.toLowerCase()}`}
+          aria-describedby={habilitado ? undefined : idMotivo}
         >
           {accionEnCurso === FAN_ACTIONS.TURN_OFF ? "Enviando..." : "Apagar"}
         </button>
       </div>
 
-      {!habilitado && <p className="ventiladores-motivo">{motivo}</p>}
+      {!habilitado && (
+        <p id={idMotivo} className="ventiladores-motivo">
+          {motivo}
+        </p>
+      )}
 
       {puedeAutomatizar && (
         <div className="card__footer">
@@ -501,13 +606,16 @@ const ControlVentiladores = () => {
       {loadingIncubadoras ? (
         <p className="ventiladores-estado">Cargando incubadoras...</p>
       ) : incubadoras.length === 0 ? (
-        <div className="card empty-state">
-          <p className="empty-state__title">No hay incubadoras disponibles</p>
-          <p className="empty-state__description">
-            Registre una incubadora activa para poder controlar sus
-            ventiladores.
-          </p>
-        </div>
+        // Si la carga falló solo se muestra el error, no "no hay incubadoras".
+        !errorIncubadoras && (
+          <div className="card empty-state">
+            <p className="empty-state__title">No hay incubadoras disponibles</p>
+            <p className="empty-state__description">
+              Registre una incubadora activa para poder controlar sus
+              ventiladores.
+            </p>
+          </div>
+        )
       ) : (
         <>
           <div className="form-group ventiladores-selector">
@@ -554,11 +662,10 @@ const ControlVentiladores = () => {
               </div>
             ) : (
               <div className="ventiladores-grid">
-                {ventiladores.map((ventilador, indice) => (
+                {ventiladores.map((ventilador) => (
                   <TarjetaVentilador
                     key={ventilador.id}
                     ventilador={ventilador}
-                    numero={indice + 1}
                     puedeControlar={puedeControlar}
                     puedeAutomatizar={puedeAutomatizar}
                   />
