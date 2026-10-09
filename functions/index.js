@@ -783,6 +783,217 @@ async function evaluarUmbrales(medicion) {
   return { alertaCreada: true, alertaId: alertaRef.id, alertasResueltas };
 }
 
+// Cantidad de órdenes recientes de un ventilador que revisa la
+// automatización antes de crear una nueva (ver evaluarAutomatizacion).
+// Usa el índice existente de "ordenes_ventilador" (ventiladorId +
+// creadaEn desc); el resto del filtrado se hace en memoria.
+const ORDENES_RECIENTES_DEDUPLICACION = 10;
+
+// Estados de una orden que todavía está en curso: ya existe y no
+// terminó, así que no se pide otra igual.
+const ESTADOS_ORDEN_EN_CURSO = ["pendiente", "enviando", "enviada"];
+
+// Decimales a los que se redondea el límite de apagado de la
+// histéresis (umbralActivacion - margenHisteresis). Ver
+// evaluarReglaAutomatizacion.
+const DECIMALES_HISTERESIS = 6;
+
+/**
+ * Evalúa una medición contra las reglas de automatización de la
+ * incubadora y, si corresponde, crea órdenes automáticas de ventilador.
+ *
+ * Consulta una sola vez "reglas_automatizacion" por incubadora + variable
+ * (sin orderBy: no requiere índice compuesto) y descarta en memoria las
+ * reglas con "activa" distinto de true. Puede haber más de una regla
+ * activa para la misma incubadora y variable (distintos ventiladores):
+ * cada una se evalúa por separado y, si una falla, se registra el error y
+ * se sigue con las demás.
+ *
+ * No es una Cloud Function: la invoca "procesarMedicion" luego de
+ * almacenar la medición, y quien la llama decide qué hacer ante un error.
+ *
+ * @param {object} medicion
+ * @param {string} medicion.incubadoraId
+ * @param {string} medicion.variable "temperatura" | "humedad".
+ * @param {number} medicion.valor
+ * @returns {Promise<{ ordenesCreadas: string[] }>} Ids de las órdenes
+ *   creadas en esta llamada.
+ */
+async function evaluarAutomatizacion(medicion) {
+  const { incubadoraId, variable, valor } = medicion;
+
+  const db = admin.firestore();
+
+  const reglasSnapshot = await db
+    .collection(COLECCION_REGLAS_AUTOMATIZACION)
+    .where("incubadoraId", "==", incubadoraId)
+    .where("variable", "==", variable)
+    .get();
+
+  const reglasActivas = reglasSnapshot.docs.filter(
+    (reglaDoc) => reglaDoc.data().activa === true
+  );
+
+  const ordenesCreadas = [];
+
+  for (const reglaDoc of reglasActivas) {
+    try {
+      const ordenId = await evaluarReglaAutomatizacion(db, reglaDoc, valor);
+
+      if (ordenId) {
+        ordenesCreadas.push(ordenId);
+      }
+    } catch (error) {
+      console.error("Error al evaluar una regla de automatización.", {
+        reglaId: reglaDoc.id,
+        incubadoraId,
+        variable,
+        error: error.message,
+      });
+    }
+  }
+
+  return { ordenesCreadas };
+}
+
+/**
+ * Aplica una regla de histéresis a un valor y crea la orden automática
+ * del ventilador si hace falta. Devuelve el id de la orden creada o null
+ * si no se hizo nada.
+ *
+ * Histéresis: con valor >= umbralActivacion el estado deseado es
+ * "encendido"; con valor <= umbralActivacion - margenHisteresis, "apagado";
+ * entre ambos límites no se hace nada (así el ventilador no se enciende y
+ * se apaga en cada medición).
+ *
+ * Punto flotante: la resta puede dar un resultado levemente distinto del
+ * decimal exacto (por ejemplo 0.3 - 0.1 = 0.19999999999999998), y un valor
+ * medido justo en el límite (0.2) quedaría del lado equivocado. Por eso el
+ * límite de apagado se redondea a DECIMALES_HISTERESIS decimales antes de
+ * comparar. El umbral de activación no necesita ajuste: se compara tal
+ * cual, sin aritmética.
+ *
+ * Se ignora el ventilador sin documento o en modo "manual". Si su
+ * "estadoActual" ya es el deseado no se hace nada; si es null (estado
+ * desconocido) cuenta como distinto. Para no acumular órdenes mientras
+ * una sigue en curso, no se crea otra con la misma acción si entre las
+ * últimas órdenes del ventilador hay una "pendiente", "enviando" o
+ * "enviada" (ver ESTADOS_ORDEN_EN_CURSO).
+ *
+ * La orden tiene el mismo formato que las de "enviarComandoVentilador",
+ * con origen "automatico" y solicitadoPor "sistema".
+ *
+ * @param {FirebaseFirestore.Firestore} db
+ * @param {FirebaseFirestore.QueryDocumentSnapshot} reglaDoc Su id es el
+ *   del ventilador.
+ * @param {number} valor
+ * @returns {Promise<string|null>}
+ */
+async function evaluarReglaAutomatizacion(db, reglaDoc, valor) {
+  const ventiladorId = reglaDoc.id;
+  const { umbralActivacion, margenHisteresis } = reglaDoc.data();
+
+  if (
+    typeof umbralActivacion !== "number" ||
+    !Number.isFinite(umbralActivacion) ||
+    typeof margenHisteresis !== "number" ||
+    !Number.isFinite(margenHisteresis)
+  ) {
+    console.warn("La regla de automatización tiene valores inválidos.", {
+      reglaId: reglaDoc.id,
+    });
+
+    return null;
+  }
+
+  const limiteApagado = Number(
+    (umbralActivacion - margenHisteresis).toFixed(DECIMALES_HISTERESIS)
+  );
+
+  let estadoDeseado;
+
+  if (valor >= umbralActivacion) {
+    estadoDeseado = "encendido";
+  } else if (valor <= limiteApagado) {
+    estadoDeseado = "apagado";
+  } else {
+    return null;
+  }
+
+  const ventiladorSnap = await db
+    .collection(COLECCION_VENTILADORES)
+    .doc(ventiladorId)
+    .get();
+
+  if (!ventiladorSnap.exists) {
+    return null;
+  }
+
+  const ventilador = ventiladorSnap.data();
+
+  if (
+    ventilador.modoControl !== "automatico" &&
+    ventilador.modoControl !== "mixto"
+  ) {
+    return null;
+  }
+
+  if (ventilador.estadoActual === estadoDeseado) {
+    return null;
+  }
+
+  const { incubadoraId, dispositivoId } = ventilador;
+
+  if (
+    !incubadoraId ||
+    typeof incubadoraId !== "string" ||
+    !dispositivoId ||
+    typeof dispositivoId !== "string"
+  ) {
+    console.warn(
+      "El ventilador no tiene incubadora o dispositivo asociado.",
+      { ventiladorId }
+    );
+
+    return null;
+  }
+
+  const accionSolicitada = estadoDeseado === "encendido" ? "encender" : "apagar";
+
+  const ordenesRecientes = await db
+    .collection(COLECCION_ORDENES_VENTILADOR)
+    .where("ventiladorId", "==", ventiladorId)
+    .orderBy("creadaEn", "desc")
+    .limit(ORDENES_RECIENTES_DEDUPLICACION)
+    .get();
+
+  const hayOrdenEnCurso = ordenesRecientes.docs.some((ordenDoc) => {
+    const orden = ordenDoc.data();
+
+    return (
+      orden.accionSolicitada === accionSolicitada &&
+      ESTADOS_ORDEN_EN_CURSO.includes(orden.estado)
+    );
+  });
+
+  if (hayOrdenEnCurso) {
+    return null;
+  }
+
+  const ordenRef = await db.collection(COLECCION_ORDENES_VENTILADOR).add({
+    ventiladorId,
+    incubadoraId,
+    dispositivoId,
+    accionSolicitada,
+    origen: "automatico",
+    estado: "pendiente",
+    solicitadoPor: "sistema",
+    creadaEn: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return ordenRef.id;
+}
+
 /**
  * Cloud Function HTTPS: procesarMedicion
  *
@@ -1087,7 +1298,24 @@ exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
   // 11. Automatización de ventiladores
   // ---------------------------------------------------------
 
-  // TODO Sprint 4: evaluarAutomatizacion
+  // Igual que con los umbrales: la medición ya está almacenada, así que
+  // un fallo de la automatización se registra pero no hace fallar la
+  // ingesta.
+
+  try {
+    await evaluarAutomatizacion({
+      incubadoraId,
+      variable,
+      valor,
+    });
+  } catch (error) {
+    console.error("Error al evaluar la automatización de ventiladores.", {
+      medicionId: medicionRef.id,
+      incubadoraId,
+      variable,
+      error: error.message,
+    });
+  }
 
   // ---------------------------------------------------------
   // 12. Respuesta
