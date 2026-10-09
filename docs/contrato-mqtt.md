@@ -104,9 +104,15 @@ otra.
   servicio estaba apagado se resuelven del mismo modo cuando el dispositivo
   envía señales durante 60 segundos tras el arranque.
 - **Limitación.** Como la detección corre dentro del servicio, si este está
-  caído no se detecta ninguna desconexión ni se crea ninguna alerta. Si falla
-  la escritura de la alerta, solo se registra en el log: el estado
-  `"desconectado"` ya escrito se mantiene y la alerta no se reintenta.
+  caído no se detecta ninguna desconexión ni se crea ninguna alerta.
+- **Fallo al crear la alerta.** Si la escritura de la alerta falla (por
+  ejemplo, un error transitorio de Firestore), el estado `"desconectado"` ya
+  escrito se mantiene y el watchdog reintenta crear la alerta en cada ciclo
+  mientras el dispositivo siga desconectado, de a un intento por vez y
+  comprobando de nuevo que no exista ya una abierta. El fallo se registra en el
+  log una sola vez. Si el dispositivo vuelve a comunicarse antes de que la
+  alerta se cree, esa caída queda sin alerta (ya no tiene sentido avisar de
+  ella); la próxima caída avisa con normalidad.
 
 ## Notas
 

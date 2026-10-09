@@ -193,6 +193,10 @@ function crearRastreadorConexion({
       resolviendo: false,
       avisoSinIncubadora: false,
       falloResolucionLogueado: false,
+      alertaPendiente: false,
+      reintentando: false,
+      falloAlertaLogueado: false,
+      ultimaSenalCaida: null,
     };
   }
 
@@ -224,13 +228,15 @@ function crearRastreadorConexion({
 
   /**
    * Crea la alerta de desconexión si el dispositivo no tiene ya una
-   * abierta. Nunca lanza: un fallo se registra y no afecta al estado
-   * de conexión ya escrito.
+   * abierta. Nunca lanza: un fallo se registra (una sola vez mientras
+   * siga fallando) y no afecta al estado de conexión ya escrito.
    *
    * @param {string} dispositivoId
    * @param {Object} entrada
    * @param {number} ultimaSenal ms de la última señal vista.
-   * @returns {Promise<void>}
+   * @returns {Promise<boolean>} true si la alerta quedó creada o ya
+   *   existía (o no hay nada que reintentar porque se desconoce la
+   *   incubadora); false si falló y conviene reintentar.
    */
   async function crearAlertaDesconexion(dispositivoId, entrada, ultimaSenal) {
     try {
@@ -244,13 +250,15 @@ function crearRastreadorConexion({
           );
         }
 
-        return;
+        return true;
       }
 
       const abiertas = await consultarAlertasAbiertas(dispositivoId, 1);
 
       if (!abiertas.empty) {
-        return;
+        entrada.falloAlertaLogueado = false;
+
+        return true;
       }
 
       await db.collection(COLECCION_ALERTAS).add({
@@ -270,12 +278,22 @@ function crearRastreadorConexion({
         `${PREFIJO_LOG} Alerta de desconexión creada para ` +
           `"${dispositivoId}".`
       );
+
+      entrada.falloAlertaLogueado = false;
+
+      return true;
     } catch (error) {
-      logger.error(
-        `${PREFIJO_LOG} No se pudo crear la alerta de desconexión de ` +
-          `"${dispositivoId}":`,
-        error && error.message ? error.message : error
-      );
+      if (!entrada.falloAlertaLogueado) {
+        entrada.falloAlertaLogueado = true;
+
+        logger.error(
+          `${PREFIJO_LOG} No se pudo crear la alerta de desconexión de ` +
+            `"${dispositivoId}" (se reintenta):`,
+          error && error.message ? error.message : error
+        );
+      }
+
+      return false;
     }
   }
 
@@ -450,6 +468,10 @@ function crearRastreadorConexion({
       entrada.ultimoRefresco = t;
       entrada.conectadoDesde = t;
 
+      // Si la alerta de esta caída seguía sin crearse, ya no se crea:
+      // el dispositivo volvió. La próxima caída avisa con normalidad.
+      entrada.alertaPendiente = false;
+
       const resultado = await encolar(entrada, () =>
         actualizar(dispositivoId, {
           estadoConexion: CONECTADO,
@@ -496,6 +518,41 @@ function crearRastreadorConexion({
       }
 
       for (const [dispositivoId, entrada] of dispositivos) {
+        if (
+          entrada.estado === DESCONECTADO &&
+          entrada.alertaPendiente &&
+          !entrada.reintentando
+        ) {
+          // La alerta de esta caída no se pudo crear: se reintenta en
+          // cada ciclo mientras siga desconectado (sin intentos en
+          // paralelo; la consulta de duplicados evita crear dos).
+          entrada.reintentando = true;
+
+          pendientes.push(
+            encolar(entrada, async () => {
+              try {
+                if (entrada.estado !== DESCONECTADO || !entrada.alertaPendiente) {
+                  return;
+                }
+
+                if (
+                  await crearAlertaDesconexion(
+                    dispositivoId,
+                    entrada,
+                    entrada.ultimaSenalCaida
+                  )
+                ) {
+                  entrada.alertaPendiente = false;
+                }
+              } finally {
+                entrada.reintentando = false;
+              }
+            })
+          );
+
+          continue;
+        }
+
         if (entrada.estado !== CONECTADO) {
           continue;
         }
@@ -545,6 +602,8 @@ function crearRastreadorConexion({
 
         const ultimaSenal = entrada.ultimaSenal;
 
+        entrada.ultimaSenalCaida = ultimaSenal;
+
         pendientes.push(
           encolar(entrada, async () => {
             // ultimaComunicacionEn no se toca: es la última vez visto.
@@ -553,7 +612,16 @@ function crearRastreadorConexion({
             });
 
             if (resultado === "ok") {
-              await crearAlertaDesconexion(dispositivoId, entrada, ultimaSenal);
+              const creada = await crearAlertaDesconexion(
+                dispositivoId,
+                entrada,
+                ultimaSenal
+              );
+
+              // Si falló, el watchdog la reintenta mientras siga
+              // desconectado; si ya volvió, no hay nada que reintentar.
+              entrada.alertaPendiente =
+                !creada && entrada.estado === DESCONECTADO;
             }
 
             return resultado;
