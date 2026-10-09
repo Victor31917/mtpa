@@ -24,11 +24,22 @@ const COLECCION_UMBRALES = "umbrales";
 const COLECCION_ALERTAS = "alertas";
 const COLECCION_VENTILADORES = "ventiladores";
 const COLECCION_ORDENES_VENTILADOR = "ordenes_ventilador";
+const COLECCION_REGLAS_AUTOMATIZACION = "reglas_automatizacion";
 
 // Variables ambientales que acepta procesarMedicion. Deben coincidir
 // con ENVIRONMENTAL_VARIABLES de frontend/src/utils/constants.js (ver
 // docs/contrato-mqtt.md: el sensor publica temperatura y/o humedad).
 const VARIABLES_MEDICION_VALIDAS = ["temperatura", "humedad"];
+
+// Modos de control de un ventilador. Deben coincidir con
+// FAN_CONTROL_MODE de frontend/src/utils/constants.js.
+const MODOS_CONTROL_VALIDOS = ["manual", "automatico", "mixto"];
+
+// Margen de histéresis mínimo que acepta guardarReglaAutomatizacion. La
+// evaluación de las reglas (evaluarAutomatizacion) redondea el límite de
+// apagado a 6 decimales: con márgenes ínfimos ese redondeo deshace la
+// banda y el ventilador oscilaría igual que sin histéresis.
+const MARGEN_HISTERESIS_MINIMO = 0.01;
 
 // =========================================================
 // ESTADOS Y TIPOS VÁLIDOS (Sprint 2 — incubadoras/dispositivos)
@@ -1435,4 +1446,231 @@ exports.enviarComandoVentilador = functions.https.onCall(async (data, context) =
     mensaje: "Orden de ventilador creada correctamente.",
   };
 });
+
+// ============================================================
+// GUARDAR REGLA DE AUTOMATIZACIÓN
+// ============================================================
+//
+// Único camino para cambiar el modo de control de un ventilador
+// ("ventiladores/{id}.modoControl") y para crear o actualizar su
+// regla de histéresis ("reglas_automatizacion/{id}"): ambas
+// colecciones están cerradas a escrituras desde el cliente (ver
+// firestore.rules).
+//
+// El modo y la regla se escriben en un solo batch: un ventilador que
+// pasa por esta función a modo automático o mixto queda con su regla
+// guardada en la misma operación.
+//
+// Datos esperados (data):
+// {
+//   ventiladorId: string,
+//   modoControl: "manual" | "automatico" | "mixto",
+//   variable: "temperatura" | "humedad",   // no requerido en "manual"
+//   umbralActivacion: number,              // no requerido en "manual"
+//   margenHisteresis: number,              // no requerido en "manual"
+//   activa: boolean,                       // no requerido en "manual"
+// }
+//
+// En modo "manual" solo se cambia el modo: la regla guardada se
+// conserva (no se evalúa) y los demás campos se ignoran.
+//
+// "automatico" con activa: false se rechaza: en modo automático
+// enviarComandoVentilador no admite comandos manuales, así que una
+// regla inactiva dejaría al ventilador sin ninguna forma de control.
+// Con "mixto" (acepta manuales) sí se permite.
+//
+// La regla usa como id el del ventilador (una regla por ventilador)
+// y copia su "incubadoraId": "procesarMedicion" busca las reglas por
+// incubadora y variable.
+//
+// ============================================================
+
+exports.guardarReglaAutomatizacion = functions.https.onCall(
+  async (data, context) => {
+    // ----------------------------------------------------------
+    // 1. Autorización
+    // ----------------------------------------------------------
+
+    requireRole(
+      context,
+      ["administrador"],
+      "Solo un administrador puede configurar la automatización de un ventilador."
+    );
+
+    // ----------------------------------------------------------
+    // 2. Validar datos recibidos
+    // ----------------------------------------------------------
+
+    const {
+      ventiladorId,
+      modoControl,
+      variable,
+      umbralActivacion,
+      margenHisteresis,
+      activa,
+    } = data || {};
+
+    if (!ventiladorId || typeof ventiladorId !== "string") {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "El ventiladorId es obligatorio."
+      );
+    }
+
+    // Se usa como id de documento: Firestore no admite "/", "." ni ".."
+    // ni ids con la forma "__...__"; sin este chequeo llegarían como
+    // un error interno.
+    if (
+      ventiladorId.includes("/") ||
+      ventiladorId === "." ||
+      ventiladorId === ".." ||
+      /^__.*__$/.test(ventiladorId)
+    ) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "El ventiladorId no es válido."
+      );
+    }
+
+    if (!MODOS_CONTROL_VALIDOS.includes(modoControl)) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        `El modoControl debe ser uno de: ${MODOS_CONTROL_VALIDOS.join(", ")}.`
+      );
+    }
+
+    // En "manual" no se guarda regla, así que sus campos no se validan.
+    const guardaRegla = modoControl !== "manual";
+
+    if (guardaRegla) {
+      if (!VARIABLES_MEDICION_VALIDAS.includes(variable)) {
+        throw new functions.https.HttpsError(
+          "invalid-argument",
+          `La variable debe ser una de: ${VARIABLES_MEDICION_VALIDAS.join(", ")}.`
+        );
+      }
+
+      if (
+        typeof umbralActivacion !== "number" ||
+        !Number.isFinite(umbralActivacion)
+      ) {
+        throw new functions.https.HttpsError(
+          "invalid-argument",
+          "El umbralActivacion debe ser un número válido."
+        );
+      }
+
+      if (
+        typeof margenHisteresis !== "number" ||
+        !Number.isFinite(margenHisteresis)
+      ) {
+        throw new functions.https.HttpsError(
+          "invalid-argument",
+          "El margenHisteresis debe ser un número válido."
+        );
+      }
+
+      // Con un margen <= 0 el ventilador se encendería y apagaría en
+      // el mismo valor, y con uno ínfimo el redondeo de la evaluación
+      // deshace la banda (ver MARGEN_HISTERESIS_MINIMO).
+      if (margenHisteresis < MARGEN_HISTERESIS_MINIMO) {
+        throw new functions.https.HttpsError(
+          "invalid-argument",
+          `El margenHisteresis debe ser al menos ${MARGEN_HISTERESIS_MINIMO}.`
+        );
+      }
+
+      // Con un margen >= al umbral, la banda de apagado quedaría en
+      // cero o por debajo de él. Como el margen mínimo es positivo,
+      // esto también rechaza los umbrales negativos, cero o menores
+      // que el margen.
+      if (margenHisteresis >= umbralActivacion) {
+        throw new functions.https.HttpsError(
+          "invalid-argument",
+          "El umbralActivacion debe ser positivo y mayor que el margenHisteresis."
+        );
+      }
+
+      if (typeof activa !== "boolean") {
+        throw new functions.https.HttpsError(
+          "invalid-argument",
+          "El campo activa debe ser verdadero o falso."
+        );
+      }
+
+      if (modoControl === "automatico" && !activa) {
+        throw new functions.https.HttpsError(
+          "invalid-argument",
+          "En modo automático la regla debe estar activa: una regla inactiva " +
+            "dejaría al ventilador sin control, porque en ese modo se rechazan " +
+            'los comandos manuales. Usá el modo "mixto" o "manual".'
+        );
+      }
+    }
+
+    // ----------------------------------------------------------
+    // 3. Verificar que el ventilador exista
+    // ----------------------------------------------------------
+
+    const db = admin.firestore();
+
+    const ventiladorRef = db
+      .collection(COLECCION_VENTILADORES)
+      .doc(ventiladorId);
+
+    const ventiladorSnap = await ventiladorRef.get();
+
+    if (!ventiladorSnap.exists) {
+      throw new functions.https.HttpsError(
+        "not-found",
+        "El ventilador solicitado no existe."
+      );
+    }
+
+    // ----------------------------------------------------------
+    // 4. Guardar modo y regla en un solo batch
+    // ----------------------------------------------------------
+
+    // La regla copia la incubadora del ventilador (igual que las
+    // órdenes de enviarComandoVentilador).
+    const { incubadoraId } = ventiladorSnap.data();
+
+    if (guardaRegla && (!incubadoraId || typeof incubadoraId !== "string")) {
+      throw new functions.https.HttpsError(
+        "failed-precondition",
+        "El ventilador no tiene incubadora asociada, por lo que no se puede guardar la regla."
+      );
+    }
+
+    const batch = db.batch();
+
+    batch.update(ventiladorRef, { modoControl });
+
+    if (guardaRegla) {
+      batch.set(db.collection(COLECCION_REGLAS_AUTOMATIZACION).doc(ventiladorId), {
+        ventiladorId,
+        incubadoraId,
+        variable,
+        umbralActivacion,
+        margenHisteresis,
+        activa,
+        actualizadoEn: admin.firestore.FieldValue.serverTimestamp(),
+        actualizadoPor: context.auth.uid,
+      });
+    }
+
+    await batch.commit();
+
+    // ----------------------------------------------------------
+    // 5. Respuesta
+    // ----------------------------------------------------------
+
+    return {
+      ok: true,
+      ventiladorId,
+      modoControl,
+      mensaje: "Configuración del ventilador guardada correctamente.",
+    };
+  }
+);
 
