@@ -4,17 +4,20 @@
 // =========================================================
 //
 // Única capa autorizada a hablar directamente con Firestore
-// para leer la colección "alertas". Las alertas las crea la
+// para la colección "alertas". Las alertas las crea la
 // Cloud Function "procesarMedicion" (evaluarUmbrales); el
-// cliente solo las consulta.
+// cliente las consulta y, con permiso, solo cambia su "estado".
 // =========================================================
 
 import {
   collection,
+  doc,
   limit,
   onSnapshot,
   orderBy,
   query,
+  updateDoc,
+  where,
 } from "firebase/firestore";
 
 import { db } from "../services/firebase";
@@ -32,11 +35,13 @@ const LIMITE_POR_DEFECTO = 50;
  * Se suscribe (onSnapshot) a las alertas más recientes, de la
  * más nueva a la más antigua (campo "creadaEn").
  *
- * La consulta usa únicamente orderBy("creadaEn") + limit, que
- * no requiere índice compuesto; por eso "estado" e
- * "incubadoraId" se filtran en el cliente. Consecuencia: el
- * límite se aplica antes del filtro, así que con filtros puede
- * llegar una lista con menos de "limite" alertas.
+ * Sin filtros usa orderBy("creadaEn") + limit. Con "estado" y/o
+ * "incubadoraId" filtra en el servidor con igualdades simples
+ * (where "==") y ordena y recorta en el cliente: así el límite se
+ * aplica DESPUÉS del filtro y una alerta antigua que cumple el
+ * filtro no se pierde por haber quedado fuera de las últimas N.
+ * Ninguna de las dos consultas requiere índice compuesto (un
+ * where más un orderBy en otro campo sí lo exigiría).
  *
  * @param {Object} [filtros]
  * @param {string} [filtros.estado] Ej.: ALERT_STATUS.ACTIVE.
@@ -59,11 +64,22 @@ export const suscribirseAlertas = (
     limite = LIMITE_POR_DEFECTO,
   } = filtros;
 
-  const referencia = query(
-    collection(db, COLLECTIONS.ALERTS),
-    orderBy("creadaEn", "desc"),
-    limit(limite)
-  );
+  const filtrosServidor = [];
+
+  if (estado) {
+    filtrosServidor.push(where("estado", "==", estado));
+  }
+
+  if (incubadoraId) {
+    filtrosServidor.push(where("incubadoraId", "==", incubadoraId));
+  }
+
+  const coleccion = collection(db, COLLECTIONS.ALERTS);
+
+  const referencia =
+    filtrosServidor.length > 0
+      ? query(coleccion, ...filtrosServidor)
+      : query(coleccion, orderBy("creadaEn", "desc"), limit(limite));
 
   return onSnapshot(
     referencia,
@@ -73,11 +89,12 @@ export const suscribirseAlertas = (
           id: documento.id,
           ...documento.data(),
         }))
-        .filter(
-          (alerta) =>
-            (!estado || alerta.estado === estado) &&
-            (!incubadoraId || alerta.incubadoraId === incubadoraId)
-        );
+        .sort(
+          (a, b) =>
+            (b.creadaEn?.toMillis?.() ?? 0) -
+            (a.creadaEn?.toMillis?.() ?? 0)
+        )
+        .slice(0, limite);
 
       onCambio(alertas);
     },
@@ -86,6 +103,55 @@ export const suscribirseAlertas = (
 };
 
 
+// =========================================================
+// SUSCRIBIRSE A UNA ALERTA (TIEMPO REAL)
+// =========================================================
+
+/**
+ * Se suscribe (onSnapshot) al documento alertas/{id}.
+ *
+ * @param {string} id
+ * @param {(alerta: Object|null) => void} onCambio Se invoca con la alerta
+ * (incluyendo su id), o con null si el documento no existe.
+ * @param {(error: Error) => void} [onError]
+ * @returns {() => void} Función "unsubscribe": hay que invocarla en el
+ * cleanup del efecto que la usa para no dejar el listener colgado.
+ */
+export const suscribirseAAlerta = (id, onCambio, onError) =>
+  onSnapshot(
+    doc(db, COLLECTIONS.ALERTS, id),
+    (snapshot) => {
+      onCambio(
+        snapshot.exists()
+          ? { id: snapshot.id, ...snapshot.data() }
+          : null
+      );
+    },
+    onError
+  );
+
+
+// =========================================================
+// ACTUALIZAR EL ESTADO DE UNA ALERTA
+// =========================================================
+
+/**
+ * Cambia únicamente el campo "estado" de alertas/{id}.
+ *
+ * firestore.rules solo lo permite a administrador y operador, y solo
+ * hacia "reconocida" o "resuelta" (ALERT_STATUS en utils/constants.js):
+ * cualquier otro intento lo rechaza Firestore con "permission-denied".
+ *
+ * @param {string} id
+ * @param {string} estado
+ * @returns {Promise<void>}
+ */
+export const actualizarEstado = (id, estado) =>
+  updateDoc(doc(db, COLLECTIONS.ALERTS, id), { estado });
+
+
 export default {
   suscribirseAlertas,
+  suscribirseAAlerta,
+  actualizarEstado,
 };

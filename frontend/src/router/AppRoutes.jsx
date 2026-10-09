@@ -8,6 +8,8 @@ import Dashboard from "../pages/dashboard/Dashboard";
 import Incubadoras from "../pages/incubadoras/Incubadoras";
 import IncubadoraDetalle from "../pages/incubadoras/IncubadoraDetalle";
 import IncubadoraForm from "../pages/incubadoras/IncubadoraForm";
+import Alertas from "../pages/alertas/Alertas";
+import AlertaDetalle from "../pages/alertas/AlertaDetalle";
 import ConfiguracionLimites from "../pages/configuracion/ConfiguracionLimites";
 import Usuarios from "../pages/usuarios/Usuarios";
 import UsuarioForm from "../pages/usuarios/UsuarioForm";
@@ -53,6 +55,9 @@ const AppRoutes = () => {
             path={ROUTES.INCUBATOR_DETAIL}
             element={<IncubadoraDetalle />}
           />
+
+          <Route path={ROUTES.ALERTS} element={<Alertas />} />
+          <Route path={ROUTES.ALERT_DETAIL} element={<AlertaDetalle />} />
 
           <Route element={<RoleRoute roles={[ROLES.ADMIN]} />}>
             <Route path={ROUTES.USERS} element={<Usuarios />} />

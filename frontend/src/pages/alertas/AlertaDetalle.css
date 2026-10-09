@@ -1,0 +1,164 @@
+/* =========================================================
+   M.T.P.A. - DETALLE DE ALERTA
+   La estructura de página, tarjeta, mensajes y estado vacío
+   salen de las utilidades de global.css; aquí solo lo propio.
+   ========================================================= */
+
+.alerta-detalle-page {
+  max-width: 800px;
+}
+
+.alerta-detalle__volver {
+  display: inline-block;
+
+  margin-bottom: var(--spacing-5);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+
+  text-decoration: none;
+}
+
+.alerta-detalle__volver:hover {
+  text-decoration: underline;
+}
+
+.alerta-detalle__estado {
+  padding: var(--spacing-8);
+
+  color: var(--color-text-secondary);
+
+  text-align: center;
+}
+
+.alerta-detalle__encabezado {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+
+  gap: var(--spacing-4);
+
+  margin-bottom: var(--spacing-5);
+}
+
+.alerta-detalle__titulo {
+  margin: 0 0 var(--spacing-2);
+
+  font-size: var(--font-size-xl);
+}
+
+.alerta-detalle__mensaje {
+  margin: 0;
+}
+
+.alerta-detalle__badge {
+  flex-shrink: 0;
+
+  padding: var(--spacing-1) var(--spacing-3);
+
+  color: var(--color-text-secondary);
+  background-color: var(--color-background-secondary);
+
+  border-radius: var(--radius-pill);
+
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.alerta-detalle__badge--activa {
+  color: var(--color-danger-dark);
+  background-color: var(--color-danger-light);
+}
+
+.alerta-detalle__badge--reconocida {
+  color: var(--color-warning-dark);
+  background-color: var(--color-warning-light);
+}
+
+.alerta-detalle__badge--resuelta {
+  color: var(--color-success-dark);
+  background-color: var(--color-success-light);
+}
+
+.alerta-detalle__lista {
+  margin: 0;
+}
+
+.alerta-detalle__fila {
+  display: flex;
+  justify-content: space-between;
+
+  gap: var(--spacing-4);
+
+  padding: var(--spacing-3) 0;
+
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.alerta-detalle__fila:last-child {
+  border-bottom: none;
+}
+
+.alerta-detalle__fila dt {
+  color: var(--color-text-secondary);
+
+  font-size: var(--font-size-sm);
+}
+
+.alerta-detalle__fila dd {
+  margin: 0;
+
+  color: var(--color-text-primary);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+
+  text-align: right;
+}
+
+.alerta-detalle .message {
+  margin-top: var(--spacing-5);
+}
+
+.alerta-detalle__boton {
+  padding: var(--spacing-3) var(--spacing-5);
+
+  color: var(--color-text-light);
+  background-color: var(--color-primary);
+
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+
+  cursor: pointer;
+
+  transition: background-color var(--transition-fast);
+}
+
+.alerta-detalle__boton:hover:not(:disabled) {
+  background-color: var(--color-primary-hover);
+}
+
+.alerta-detalle__boton:focus-visible {
+  outline: none;
+
+  box-shadow: var(--focus-ring);
+}
+
+.alerta-detalle__boton:disabled {
+  opacity: 0.7;
+
+  cursor: not-allowed;
+}
+
+@media (max-width: 576px) {
+  .alerta-detalle__encabezado {
+    flex-direction: column;
+  }
+
+  .alerta-detalle__boton {
+    width: 100%;
+  }
+}

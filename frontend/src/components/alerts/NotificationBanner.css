@@ -52,6 +52,15 @@
   line-height: 1.5;
 }
 
+.notification-banner__link {
+  display: inline-block;
+  margin-top: 0.5rem;
+
+  color: var(--color-primary-hover);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 .notification-banner__dismiss {
   display: flex;
   align-items: center;

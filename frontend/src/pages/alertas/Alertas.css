@@ -1,0 +1,80 @@
+/* =========================================================
+   M.T.P.A. - LISTADO DE ALERTAS
+   La estructura de página, mensajes y estado vacío salen de
+   las utilidades de global.css; aquí solo lo propio.
+   ========================================================= */
+
+.alertas-page {
+  max-width: var(--content-max-width);
+}
+
+.alertas-filtros {
+  display: flex;
+  flex-wrap: wrap;
+
+  gap: var(--spacing-2);
+
+  margin-bottom: var(--spacing-5);
+}
+
+.alertas-filtro {
+  padding: var(--spacing-2) var(--spacing-4);
+
+  color: var(--color-text-primary);
+  background-color: var(--color-surface);
+
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+
+  cursor: pointer;
+
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.alertas-filtro:hover {
+  border-color: var(--color-primary);
+
+  color: var(--color-primary);
+}
+
+.alertas-filtro:focus-visible {
+  outline: none;
+
+  box-shadow: var(--focus-ring);
+}
+
+.alertas-filtro--activo,
+.alertas-filtro--activo:hover {
+  color: var(--color-text-light);
+  background-color: var(--color-primary);
+
+  border-color: var(--color-primary);
+}
+
+.alertas-mensaje {
+  margin-bottom: var(--spacing-4);
+}
+
+.alertas-estado {
+  padding: var(--spacing-8);
+
+  color: var(--color-text-secondary);
+
+  text-align: center;
+}
+
+@media (max-width: 576px) {
+  .alertas-filtros {
+    gap: var(--spacing-2);
+  }
+
+  .alertas-filtro {
+    flex: 1 1 calc(50% - var(--spacing-2));
+  }
+}
