@@ -81,6 +81,10 @@ afecta al resto de los mensajes (mediciones y latidos).
 Si el ventilador no tiene ninguna orden `enviada` (por ejemplo, un reporte
 espontáneo al arrancar el dispositivo), solo se actualiza `estadoActual`.
 
+Los mensajes de estado de un mismo ventilador se procesan **de a uno, en el
+orden en que llegaron**: un reporte lento de escribir no puede pisar a uno
+posterior. Ventiladores distintos se procesan en paralelo.
+
 ## Confirmación de las órdenes
 
 El estado final de una orden cumplida es **`ejecutada`** (`COMMAND_STATUS.EXECUTED`
@@ -88,16 +92,41 @@ en el frontend); no existe un estado "confirmada". El flujo completo es
 `pendiente` → `enviando` → `enviada` → `ejecutada`, con `fallida` y `expirada`
 como finales alternativos (ver `docs/modelo-datos.md`).
 
-### Correlación por "la más reciente en `enviada`"
+### Secuencia de estados al enviar un comando
 
-Como el estado no trae `ordenId`, el servicio toma la orden **más reciente del
-ventilador que esté en `enviada`** (consulta por `ventiladorId` ordenada por
-`creadaEn` descendente, filtrando el estado en memoria) y la marca `ejecutada`
-solo si la acción pedida coincide con el estado reportado: `encender` ↔
-`encendido`, `apagar` ↔ `apagado`. Si no coincide, la orden sigue `enviada`.
+1. `pendiente` → `enviando`: el servicio reclama la orden (transacción).
+2. `enviando` → `enviada` (con `enviadaEn`): **se escribe antes de publicar**, en
+   una transacción que exige que la orden siga `enviando`. Así, si el
+   dispositivo responde de inmediato, su estado ya encuentra la orden en
+   `enviada`. Por eso `enviada` significa "el servicio ya la reclamó y está por
+   publicar el comando, o ya lo publicó"; **no garantiza que se haya entregado**.
+3. Se publica el comando. Si la publicación falla, `enviada` → `fallida`
+   (transacción, con el motivo en `error`).
+4. Cuando el dispositivo reporta el estado pedido, `enviada` → `ejecutada`.
 
-**Limitación.** Con varias órdenes en vuelo para el mismo ventilador, un estado
-puede cerrar una orden que no es la que lo provocó. **Alternativa más robusta:**
+Si la escritura del paso 2 falla, el comando no se publica y la orden pasa a
+`fallida`. Si el proceso se cae entre los pasos 2 y 3, la orden queda `enviada`
+sin haberse publicado y el barrido (ver más abajo) la marca `fallida`: **un
+comando nunca se republica** ni se reintenta automáticamente. Límite conocido:
+si Firestore tampoco permite marcarla `fallida`, la orden queda `enviando`.
+
+### Correlación por "la más reciente en `enviada` que coincide"
+
+Como el estado no trae `ordenId`, el servicio mira las **10 órdenes más
+recientes del ventilador** (consulta por `ventiladorId` ordenada por `creadaEn`
+descendente; el estado y la acción se filtran en memoria) y, de las que están en
+`enviada`, toma la **más reciente cuya acción coincide con el estado
+reportado**: `encender` ↔ `encendido`, `apagar` ↔ `apagado`. Esa orden pasa a
+`ejecutada`; las demás siguen `enviada`. Si ninguna coincide, no se cierra
+ninguna (y `estadoActual` se actualiza igual).
+
+Un reporte espontáneo del dispositivo (por ejemplo, al arrancar) que coincida
+con una orden `enviada` la cierra como `ejecutada` aunque no pruebe que fue la
+respuesta a ese comando.
+
+**Limitación.** Con varias órdenes en vuelo para el mismo ventilador y la misma
+acción, un estado puede cerrar una que no es la que lo provocó; una orden fuera
+de las últimas 10 no se correlaciona. **Alternativa más robusta:**
 que el dispositivo repita en el mensaje de estado el `ordenId` recibido en el
 comando. Eso exige cambiar este contrato, el simulador
 (`iot-integration-service/simulator/simulador.js`) y la correlación del servicio;
@@ -122,6 +151,9 @@ modifica al vencer una orden.
   pisa el resultado.
 - **Confirmación tardía.** Una orden que ya venció (`fallida`) no se reabre si el
   dispositivo confirma después; solo se actualiza `estadoActual`.
+- **Relojes.** La antigüedad se calcula con el reloj del servicio contra
+  `enviadaEn`, que es un timestamp del servidor de Firestore. Si los relojes
+  difieren, el vencimiento se corre en esa diferencia. No se corrige.
 
 ## Detección de desconexión
 

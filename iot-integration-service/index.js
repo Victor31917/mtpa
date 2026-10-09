@@ -764,8 +764,10 @@ function conectar(
 //
 //   1. La reclama en una transacción (pendiente -> enviando).
 //   2. Valida los datos y descarta las órdenes vencidas.
-//   3. Construye el tópico MQTT y publica el comando.
-//   4. Actualiza la orden a "enviada" (o "fallida").
+//   3. Construye el tópico MQTT.
+//   4. La pasa a "enviada" y publica el comando (o la pasa a
+//      "fallida"). "enviada" se escribe antes de publicar para que
+//      una confirmación inmediata del dispositivo la encuentre.
 //
 // Si MQTT no está conectado la orden queda "pendiente" y se
 // vuelve a revisar en cada (re)conexión.
@@ -927,9 +929,9 @@ function validarOrden(orden) {
  */
 async function marcarOrden(ordenRef, estado, campos = {}) {
   await ordenRef.update({
+    ...campos,
     estado,
     actualizadaEn: admin.firestore.FieldValue.serverTimestamp(),
-    ...campos,
   });
 }
 
@@ -939,15 +941,36 @@ async function marcarOrden(ordenRef, estado, campos = {}) {
  *
  * @param {FirebaseFirestore.DocumentReference} ordenRef
  * @param {string} motivo
+ * @param {string} [desde] Si se indica, la orden solo pasa a fallida
+ * (en una transacción) si todavía está en ese estado; así no pisa una
+ * orden que otro proceso ya cerró.
  * @returns {Promise<void>}
  */
-async function marcarOrdenFallida(ordenRef, motivo) {
+async function marcarOrdenFallida(ordenRef, motivo, desde = null) {
   console.error(
     `[iot-integration-service] Orden ${ordenRef.id} fallida: ` +
       motivo
   );
 
   try {
+    if (desde) {
+      const orden = await transicionarOrden(
+        ordenRef,
+        desde,
+        ESTADO_ORDEN.FALLIDA,
+        { error: motivo }
+      );
+
+      if (!orden) {
+        console.warn(
+          `[iot-integration-service] La orden ${ordenRef.id} ya no ` +
+            `estaba en "${desde}"; no se marca fallida.`
+        );
+      }
+
+      return;
+    }
+
     await marcarOrden(ordenRef, ESTADO_ORDEN.FALLIDA, {
       error: motivo,
     });
@@ -982,9 +1005,9 @@ function transicionarOrden(ordenRef, desde, hasta, campos = {}) {
     }
 
     transaccion.update(ordenRef, {
+      ...campos,
       estado: hasta,
       actualizadaEn: admin.firestore.FieldValue.serverTimestamp(),
-      ...campos,
     });
 
     return snapshot.data();
@@ -1003,10 +1026,11 @@ function transicionarOrden(ordenRef, desde, hasta, campos = {}) {
 //      estado, la cierra como "ejecutada".
 //
 // El mensaje no trae "ordenId": se correlaciona con la orden
-// "enviada" más reciente del ventilador. Las órdenes "enviada" que
-// nadie confirma las marca "fallida" el barrido periódico
-// (barrerOrdenesEnviadas), que también cubre el caso de un
-// reinicio del servicio.
+// "enviada" más reciente del ventilador cuya acción coincide con el
+// estado reportado. Los mensajes de un mismo ventilador se procesan
+// de a uno. Las órdenes "enviada" que nadie confirma las marca
+// "fallida" el barrido periódico (barrerOrdenesEnviadas), que
+// también cubre el caso de un reinicio del servicio.
 //
 // =========================================================
 
@@ -1083,6 +1107,50 @@ function validarEstadoVentilador(contexto, payload) {
   };
 }
 
+// dispositivoId -> última tarea de estado encolada (nunca rechaza).
+const colasDeEstado = new Map();
+
+/**
+ * Ejecuta las tareas de un mismo ventilador una tras otra, en el orden
+ * en que llegaron: así un "update" lento de un reporte no pisa a uno
+ * posterior. Un error en una tarea se devuelve a quien la encoló pero
+ * no corta la cadena. La entrada se borra cuando la cadena se vacía.
+ *
+ * @param {string} clave
+ * @param {() => Promise<void>} tarea
+ * @returns {Promise<void>}
+ */
+function encolarPorVentilador(clave, tarea) {
+  const previa = colasDeEstado.get(clave) || Promise.resolve();
+  const resultado = previa.then(tarea);
+  const cola = resultado.catch(() => {});
+
+  colasDeEstado.set(clave, cola);
+
+  cola.then(() => {
+    if (colasDeEstado.get(clave) === cola) {
+      colasDeEstado.delete(clave);
+    }
+  });
+
+  return resultado;
+}
+
+/**
+ * Procesa el estado que reporta un ventilador, de a un mensaje por
+ * ventilador (ver encolarPorVentilador).
+ *
+ * @param {{incubadoraId: string, dispositivoId: string}} contexto
+ * @param {Object} payload
+ * @returns {Promise<void>}
+ */
+function manejarEstadoVentilador(contexto, payload) {
+  // El documento que se escribe es ventiladores/{dispositivoId}.
+  return encolarPorVentilador(contexto.dispositivoId, () =>
+    procesarEstadoVentilador(contexto, payload)
+  );
+}
+
 /**
  * Procesa el estado que reporta un ventilador: actualiza
  * "ventiladores/{dispositivoId}" y cierra la orden en curso si el
@@ -1094,7 +1162,7 @@ function validarEstadoVentilador(contexto, payload) {
  * @param {Object} payload
  * @returns {Promise<void>}
  */
-async function manejarEstadoVentilador(contexto, payload) {
+async function procesarEstadoVentilador(contexto, payload) {
   const { incubadoraId, dispositivoId } = contexto;
 
   const validacion = validarEstadoVentilador(contexto, payload);
@@ -1158,13 +1226,14 @@ async function manejarEstadoVentilador(contexto, payload) {
 }
 
 /**
- * Busca la orden "enviada" más reciente del ventilador y, si pedía
- * el estado reportado, la marca "ejecutada". Si el estado no
- * coincide, o no hay ninguna "enviada" (reporte espontáneo), no
- * toca nada.
+ * Busca la orden "enviada" más reciente del ventilador cuya acción
+ * coincida con el estado reportado y la marca "ejecutada". Si no hay
+ * ninguna (reporte espontáneo, o el estado no es el que pedía ninguna
+ * orden en vuelo), no toca nada.
  *
- * Usa el índice existente (ventiladorId + creadaEn desc) y filtra el
- * estado en memoria.
+ * Mira las últimas ORDENES_A_CORRELACIONAR órdenes del ventilador:
+ * usa el índice existente (ventiladorId + creadaEn desc) y filtra el
+ * estado y la acción en memoria.
  *
  * @param {string} ventiladorId
  * @param {string} estado Estado reportado ("encendido" o "apagado").
@@ -1178,21 +1247,24 @@ async function cerrarOrdenEnCurso(ventiladorId, estado) {
     .limit(ORDENES_A_CORRELACIONAR)
     .get();
 
-  const ordenDoc = snapshot.docs.find(
+  const enviadas = snapshot.docs.filter(
     (doc) => doc.data().estado === ESTADO_ORDEN.ENVIADA
   );
 
-  if (!ordenDoc) {
+  if (enviadas.length === 0) {
     return;
   }
 
-  const accion = ordenDoc.data().accionSolicitada;
+  const ordenDoc = enviadas.find(
+    (doc) =>
+      ESTADO_ESPERADO_POR_ACCION[doc.data().accionSolicitada] === estado
+  );
 
-  if (ESTADO_ESPERADO_POR_ACCION[accion] !== estado) {
+  if (!ordenDoc) {
     console.warn(
-      `[iot-integration-service] La orden ${ordenDoc.id} pedía ` +
-        `"${accion}" pero el ventilador reportó "${estado}": ` +
-        "sigue enviada."
+      `[iot-integration-service] El ventilador ${ventiladorId} ` +
+        `reportó "${estado}", pero ninguna orden enviada lo pedía: ` +
+        "siguen enviadas."
     );
 
     return;
@@ -1495,6 +1567,51 @@ async function enviarOrdenReclamada(ordenRef, orden, cliente) {
   });
 
   // -------------------------------------------------------
+  // Marcar la orden como enviada (antes de publicar)
+  // -------------------------------------------------------
+  //
+  // Se escribe "enviada" ANTES de publicar: el dispositivo puede
+  // responder en milisegundos y su estado se correlaciona con las
+  // órdenes "enviada" (ver cerrarOrdenEnCurso); si la escritura
+  // llegara después, la confirmación no encontraría la orden y el
+  // barrido la daría por fallida. "enviada" significa entonces que el
+  // servicio está por publicar el comando (o ya lo publicó), no que
+  // se haya entregado.
+  //
+  // Si esta escritura falla no se publica: la orden pasa a "fallida"
+  // con el motivo. Si el proceso muere entre esta escritura y la
+  // publicación, la orden queda "enviada" y el barrido la cierra como
+  // fallida: el comando NUNCA se republica.
+  //
+
+  let enviada;
+
+  try {
+    enviada = await transicionarOrden(
+      ordenRef,
+      ESTADO_ORDEN.ENVIANDO,
+      ESTADO_ORDEN.ENVIADA,
+      { enviadaEn: admin.firestore.FieldValue.serverTimestamp() }
+    );
+  } catch (error) {
+    await marcarOrdenFallida(
+      ordenRef,
+      `No se pudo marcar la orden como enviada: ${error.message}`,
+      ESTADO_ORDEN.ENVIANDO
+    );
+    return;
+  }
+
+  if (!enviada) {
+    // Ya no estaba "enviando" (por ejemplo, otro proceso la cerró).
+    console.warn(
+      `[iot-integration-service] La orden ${ordenId} ya no estaba ` +
+        'en "enviando"; no se publica.'
+    );
+    return;
+  }
+
+  // -------------------------------------------------------
   // Publicar comando
   // -------------------------------------------------------
 
@@ -1503,7 +1620,8 @@ async function enviarOrdenReclamada(ordenRef, orden, cliente) {
   } catch (error) {
     await marcarOrdenFallida(
       ordenRef,
-      `No se pudo publicar el comando: ${error.message}`
+      `No se pudo publicar el comando: ${error.message}`,
+      ESTADO_ORDEN.ENVIADA
     );
     return;
   }
@@ -1512,32 +1630,6 @@ async function enviarOrdenReclamada(ordenRef, orden, cliente) {
     `[iot-integration-service] Orden ${ordenId} publicada ` +
       `en "${topico}".`
   );
-
-  // -------------------------------------------------------
-  // Actualizar estado
-  // -------------------------------------------------------
-  //
-  // Si esta escritura falla, la orden queda en "enviando": el
-  // comando ya salió y no debe publicarse otra vez.
-  //
-
-  try {
-    await marcarOrden(ordenRef, ESTADO_ORDEN.ENVIADA, {
-      enviadaEn: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    console.log(
-      `[iot-integration-service] Orden ${ordenId} actualizada ` +
-        'a estado "enviada".'
-    );
-  } catch (error) {
-    console.error(
-      `[iot-integration-service] El comando de la orden ` +
-        `${ordenId} se publicó, pero no se pudo actualizar ` +
-        "su estado:",
-      error
-    );
-  }
 }
 
 // =========================================================

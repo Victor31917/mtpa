@@ -191,16 +191,17 @@ la afecta.
 Representa un ventilador de una incubadora. Es el documento que lee la Cloud
 Function `enviarComandoVentilador` antes de crear una orden. Ningún cliente lo
 escribe (ver `firestore.rules`): lo crea la Cloud Function `crearDispositivo`,
-`guardarReglaAutomatizacion` cambia su `modoControl` y está previsto que el
-Servicio de Integración IoT actualice el estado con Admin SDK (Sprint 4, tarea
-[10]; hoy nada lo escribe).
+`guardarReglaAutomatizacion` cambia su `modoControl` y el Servicio de
+Integración IoT actualiza el estado con Admin SDK cuando el ventilador lo
+reporta (ver `docs/contrato-mqtt.md`).
 
 | Campo          | Tipo     | Descripción                                                                 |
 | -------------- | -------- | ------------------------------------------------------------------------------ |
 | `incubadoraId` | `string` | Incubadora a la que pertenece (`incubadoras/{id}`). Se copia a cada orden.      |
 | `dispositivoId`| `string` | Dispositivo físico asociado (`dispositivos/{id}`, tipo `ventilador`). Junto con `incubadoraId` arma el tópico MQTT del comando (ver `docs/contrato-mqtt.md`). Se copia a cada orden. |
 | `modoControl`  | `string` | Uno de los valores de `FAN_CONTROL_MODE` (`manual`, `automatico`, `mixto`). `enviarComandoVentilador` solo acepta comandos manuales en `manual` y `mixto`. Nace en `manual`. Solo se cambia con `guardarReglaAutomatizacion` (ver `reglas_automatizacion`). |
-| `estadoActual` | `string \| null` | Uno de los valores de `FAN_STATUS` (`encendido`, `apagado`). Nace en `null` (estado desconocido). Está previsto que el Servicio de Integración lo escriba al recibir la confirmación del dispositivo (Sprint 4, tarea [10]); hoy nada lo escribe, así que permanece en `null`. |
+| `estadoActual` | `string \| null` | Uno de los valores de `FAN_STATUS` (`encendido`, `apagado`). Nace en `null` (estado desconocido). El Servicio de Integración lo escribe cada vez que el ventilador publica su estado (`encendido: true` → `encendido`, `false` → `apagado`), haya o no una orden en curso. Una orden que vence sin confirmación no lo modifica. |
+| `actualizadoEn`| `timestamp` | Último estado reportado por el ventilador (server timestamp, lo escribe el Servicio de Integración). No existe hasta el primer reporte. |
 | `creadoEn`     | `timestamp` | Fecha de creación (server timestamp).                                       |
 
 ### Cómo se crean estos documentos
@@ -328,7 +329,8 @@ cliente solo puede leerlas (ver `firestore.rules`).
 | `estado`           | `string`    | Estado de la orden (ver tabla de abajo).                                        |
 | `solicitadoPor`    | `string`    | `uid` del usuario que envió el comando, o `"sistema"` en las órdenes automáticas. |
 | `creadaEn`         | `timestamp` | Fecha de creación (server timestamp). El Servicio de Integración descarta las órdenes pendientes demasiado antiguas. |
-| `enviadaEn`        | `timestamp` | Momento en que el comando se publicó en MQTT (lo escribe el Servicio de Integración). |
+| `enviadaEn`        | `timestamp` | Momento en que el Servicio de Integración pasó la orden a `enviada`, justo antes de publicar el comando en MQTT. El timeout de confirmación se cuenta desde aquí. |
+| `ejecutadaEn`      | `timestamp` | Momento en que el servicio registró la confirmación del dispositivo (estado `ejecutada`). Solo existe en órdenes ejecutadas. |
 | `actualizadaEn`    | `timestamp` | Último cambio de `estado` hecho por el Servicio de Integración.                 |
 | `error`            | `string`    | Motivo, cuando el estado es `fallida` o `expirada`.                             |
 
@@ -341,9 +343,9 @@ ampliado con `enviando` y `expirada`, que usa el Servicio de Integración:
 | ------------ | ------------------------------------------------------------------------------ | ---------- |
 | `pendiente`  | Orden creada, todavía no tomada por el Servicio de Integración.                | `enviarComandoVentilador` o `evaluarAutomatizacion` |
 | `enviando`   | El Servicio de Integración tomó la orden (transacción `pendiente` → `enviando`) y está publicando el comando; evita doble publicación. | Servicio de Integración |
-| `enviada`    | El comando se publicó en MQTT (`enviadaEn`).                                    | Servicio de Integración |
-| `ejecutada`  | El dispositivo confirmó el cambio por `.../estado`. Pendiente de implementar.   | Servicio de Integración (trabajo futuro) |
-| `fallida`    | La orden es inválida o no pudo publicarse (ver `error`).                        | Servicio de Integración |
+| `enviada`    | El servicio ya reclamó la orden y está por publicar el comando, o ya lo publicó (`enviadaEn`). Se escribe antes de publicar; no garantiza la entrega. | Servicio de Integración |
+| `ejecutada`  | El dispositivo confirmó el cambio por `.../estado` (`ejecutadaEn`).             | Servicio de Integración |
+| `fallida`    | La orden es inválida, no pudo publicarse, o fue enviada y el dispositivo no la confirmó a tiempo (ver `error`; el timeout es `ORDEN_CONFIRMACION_TIMEOUT_SEGUNDOS`, 30 s por defecto). | Servicio de Integración |
 | `expirada`   | Seguía `pendiente` pasado el tiempo máximo (`ORDEN_MAX_ANTIGUEDAD_SEGUNDOS`) y no se envió, para no accionar un ventilador con una orden vieja. | Servicio de Integración |
 
 Flujo normal: `pendiente` → `enviando` → `enviada` → `ejecutada`; las
