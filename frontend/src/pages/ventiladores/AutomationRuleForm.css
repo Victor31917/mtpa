@@ -96,6 +96,10 @@
   font-weight: var(--font-weight-medium);
 }
 
+.automatizacion-aviso {
+  margin-top: var(--spacing-3);
+}
+
 .automatizacion-activa input {
   accent-color: var(--color-primary);
 }

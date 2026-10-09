@@ -17,6 +17,9 @@ import "./AutomationRuleForm.css";
 
 const MODOS = Object.values(FAN_CONTROL_MODE);
 
+// Margen de histéresis mínimo que acepta la Cloud Function.
+const MARGEN_MINIMO = 0.01;
+
 const DESCRIPCION_MODO = {
   [FAN_CONTROL_MODE.MANUAL]: "Solo se aceptan comandos manuales.",
   [FAN_CONTROL_MODE.AUTOMATIC]:
@@ -94,7 +97,17 @@ const validar = (formulario) => {
     errores.margenHisteresis = "Ingrese un margen numérico.";
   }
 
-  if (Object.keys(errores).length > 0) {
+  // En modo automático los comandos manuales se rechazan: con la regla
+  // inactiva el ventilador quedaría sin ninguna forma de control.
+  if (
+    formulario.modoControl === FAN_CONTROL_MODE.AUTOMATIC &&
+    !formulario.activa
+  ) {
+    errores.activa =
+      "En modo automático la regla debe estar activa. Elija el modo Mixto si desea dejarla inactiva.";
+  }
+
+  if (errores.variable || errores.umbralActivacion || errores.margenHisteresis) {
     return errores;
   }
 
@@ -103,6 +116,8 @@ const validar = (formulario) => {
 
   if (margen <= 0) {
     errores.margenHisteresis = "El margen debe ser mayor que 0.";
+  } else if (margen < MARGEN_MINIMO) {
+    errores.margenHisteresis = "El margen mínimo es 0,01.";
   } else if (margen >= umbral) {
     errores.margenHisteresis = "El margen debe ser menor que el umbral.";
   }
@@ -111,26 +126,42 @@ const validar = (formulario) => {
 };
 
 // Datos que recibe la callable "guardarReglaAutomatizacion". En modo manual
-// los campos de la regla solo viajan si ya tienen un valor numérico (el de la
-// regla guardada); si no, se omiten.
+// solo se cambia el modo (la Cloud Function ignora el resto y conserva la regla
+// guardada), así que no se envían los campos de la regla.
 const armarDatos = (ventiladorId, formulario) => {
-  const datos = {
-    ventiladorId,
-    modoControl: formulario.modoControl,
-    activa: formulario.activa,
-  };
-
-  const reglaCompleta =
-    esNumeroFinito(formulario.umbralActivacion) &&
-    esNumeroFinito(formulario.margenHisteresis);
-
-  if (formulario.modoControl !== FAN_CONTROL_MODE.MANUAL || reglaCompleta) {
-    datos.variable = formulario.variable;
-    datos.umbralActivacion = Number(formulario.umbralActivacion);
-    datos.margenHisteresis = Number(formulario.margenHisteresis);
+  if (formulario.modoControl === FAN_CONTROL_MODE.MANUAL) {
+    return { ventiladorId, modoControl: formulario.modoControl };
   }
 
-  return datos;
+  return {
+    ventiladorId,
+    modoControl: formulario.modoControl,
+    variable: formulario.variable,
+    umbralActivacion: Number(formulario.umbralActivacion),
+    margenHisteresis: Number(formulario.margenHisteresis),
+    activa: formulario.activa,
+  };
+};
+
+// Estado de edición después de cambiar un campo del formulario. Al cambiar de
+// modo los errores de la regla dejan de aplicar: en manual la regla no se
+// valida y el error de "activa" depende del modo.
+const aplicarCambio = (previo, campo, valor) => {
+  let errores = { ...previo.errores, [campo]: undefined };
+
+  if (campo === "modoControl") {
+    errores =
+      valor === FAN_CONTROL_MODE.MANUAL
+        ? {}
+        : { ...errores, activa: undefined };
+  }
+
+  return {
+    ...previo,
+    formulario: { ...previo.formulario, [campo]: valor },
+    errores,
+    feedback: null,
+  };
 };
 
 // Mensaje legible para el error de la callable. Los errores de validación y de
@@ -339,12 +370,7 @@ const AutomationRuleForm = () => {
   };
 
   const handleChange = (campo, valor) => {
-    setEdicion((previo) => ({
-      ...previo,
-      formulario: { ...previo.formulario, [campo]: valor },
-      errores: { ...previo.errores, [campo]: undefined },
-      feedback: null,
-    }));
+    setEdicion((previo) => aplicarCambio(previo, campo, valor));
   };
 
   const handleSubmit = async (event) => {
@@ -413,13 +439,16 @@ const AutomationRuleForm = () => {
       {loadingIncubadoras ? (
         <p className="automatizacion-estado">Cargando incubadoras...</p>
       ) : incubadoras.length === 0 ? (
-        <div className="card empty-state">
-          <p className="empty-state__title">No hay incubadoras disponibles</p>
-          <p className="empty-state__description">
-            Registre una incubadora activa para poder configurar sus
-            ventiladores.
-          </p>
-        </div>
+        // Si la carga falló solo se muestra el error, no "no hay incubadoras".
+        !errorIncubadoras && (
+          <div className="card empty-state">
+            <p className="empty-state__title">No hay incubadoras disponibles</p>
+            <p className="empty-state__description">
+              Registre una incubadora activa para poder configurar sus
+              ventiladores.
+            </p>
+          </div>
+        )
       ) : (
         <>
           <div className="automatizacion-selectores">
@@ -455,9 +484,10 @@ const AutomationRuleForm = () => {
                 onChange={(event) => setVentiladorElegido(event.target.value)}
                 disabled={guardando || ventiladores.length === 0}
               >
-                {ventiladores.map((ventilador, indice) => (
+                {ventiladores.map((ventilador) => (
                   <option key={ventilador.id} value={ventilador.id}>
-                    Ventilador {indice + 1} ({formatShortId(ventilador.id)})
+                    Ventilador{" "}
+                    {formatShortId(ventilador.dispositivoId || ventilador.id)}
                   </option>
                 ))}
               </select>
@@ -517,6 +547,9 @@ const AutomationRuleForm = () => {
                     handleChange("modoControl", event.target.value)
                   }
                   aria-invalid={Boolean(errores.modoControl)}
+                  aria-describedby={
+                    errores.modoControl ? "automatizacion-modo-error" : undefined
+                  }
                   disabled={guardando}
                 >
                   {MODOS.map((modo) => (
@@ -527,7 +560,9 @@ const AutomationRuleForm = () => {
                 </select>
 
                 {errores.modoControl ? (
-                  <span className="form-error">{errores.modoControl}</span>
+                  <span id="automatizacion-modo-error" className="form-error">
+                    {errores.modoControl}
+                  </span>
                 ) : (
                   <span className="form-helper">
                     {DESCRIPCION_MODO[formulario.modoControl]}
@@ -552,8 +587,9 @@ const AutomationRuleForm = () => {
 
                 {manual && (
                   <p className="automatizacion-regla__nota">
-                    En modo manual la regla no se aplica. Elija el modo
-                    automático o mixto para configurarla.
+                    En modo manual la regla no se aplica y la guardada se
+                    conserva sin cambios. Elija el modo automático o mixto
+                    para configurarla.
                   </p>
                 )}
 
@@ -570,6 +606,9 @@ const AutomationRuleForm = () => {
                       handleChange("variable", event.target.value)
                     }
                     aria-invalid={Boolean(errores.variable)}
+                    aria-describedby={
+                      errores.variable ? "automatizacion-variable-error" : undefined
+                    }
                   >
                     {VARIABLES.map(({ clave, titulo }) => (
                       <option key={clave} value={clave}>
@@ -579,7 +618,9 @@ const AutomationRuleForm = () => {
                   </select>
 
                   {errores.variable && (
-                    <span className="form-error">{errores.variable}</span>
+                    <span id="automatizacion-variable-error" className="form-error">
+                      {errores.variable}
+                    </span>
                   )}
                 </div>
 
@@ -600,10 +641,18 @@ const AutomationRuleForm = () => {
                         handleChange("umbralActivacion", event.target.value)
                       }
                       aria-invalid={Boolean(errores.umbralActivacion)}
+                      aria-describedby={
+                        errores.umbralActivacion
+                          ? "automatizacion-umbral-error"
+                          : undefined
+                      }
                     />
 
                     {errores.umbralActivacion && (
-                      <span className="form-error">
+                      <span
+                        id="automatizacion-umbral-error"
+                        className="form-error"
+                      >
                         {errores.umbralActivacion}
                       </span>
                     )}
@@ -625,15 +674,23 @@ const AutomationRuleForm = () => {
                         handleChange("margenHisteresis", event.target.value)
                       }
                       aria-invalid={Boolean(errores.margenHisteresis)}
+                      aria-describedby={
+                        errores.margenHisteresis
+                          ? "automatizacion-margen-error"
+                          : undefined
+                      }
                     />
 
                     {errores.margenHisteresis ? (
-                      <span className="form-error">
+                      <span
+                        id="automatizacion-margen-error"
+                        className="form-error"
+                      >
                         {errores.margenHisteresis}
                       </span>
                     ) : (
                       <span className="form-helper">
-                        Debe ser mayor que 0 y menor que el umbral.
+                        Debe ser al menos 0,01 y menor que el umbral.
                       </span>
                     )}
                   </div>
@@ -646,9 +703,33 @@ const AutomationRuleForm = () => {
                     onChange={(event) =>
                       handleChange("activa", event.target.checked)
                     }
+                    aria-invalid={Boolean(errores.activa)}
+                    aria-describedby={
+                      errores.activa ? "automatizacion-activa-error" : undefined
+                    }
                   />
                   Regla activa
                 </label>
+
+                {errores.activa && (
+                  <span
+                    id="automatizacion-activa-error"
+                    className="form-error"
+                  >
+                    {errores.activa}
+                  </span>
+                )}
+
+                {formulario.modoControl === FAN_CONTROL_MODE.MIXED &&
+                  !formulario.activa && (
+                    <div
+                      className="message message--info automatizacion-aviso"
+                      role="status"
+                    >
+                      Con la regla inactiva, el ventilador solo responderá a
+                      los comandos manuales.
+                    </div>
+                  )}
               </fieldset>
 
               {edicion.feedback && (

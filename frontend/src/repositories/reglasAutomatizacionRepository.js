@@ -67,16 +67,36 @@ export const obtenerReglaPorVentiladorId = async (ventiladorId) => {
 // =========================================================
 
 /**
- * Invoca la Cloud Function callable "guardarReglaAutomatizacion".
+ * Invoca la Cloud Function callable "guardarReglaAutomatizacion" (solo
+ * administrador), que cambia el modo de control de un ventilador y, según el
+ * modo, crea o actualiza su regla de histéresis en una sola operación.
  *
- * La función valida el rol del usuario, el ventilador, el
- * "modoControl" y la banda de histéresis ("margenHisteresis"), y
- * crea o actualiza la regla.
+ * Campos según el modo:
+ * - "manual": solo se cambia el modo. Alcanza con `ventiladorId` y
+ *   `modoControl`; la regla guardada se conserva y los demás campos se
+ *   ignoran.
+ * - "automatico" o "mixto": además son obligatorios `variable`,
+ *   `umbralActivacion`, `margenHisteresis` y `activa`.
+ *
+ * Validaciones de la función (rechaza con un error "invalid-argument"):
+ * - `variable` es "temperatura" o "humedad".
+ * - `umbralActivacion` y `margenHisteresis` son números finitos.
+ * - `margenHisteresis` es al menos 0,01 y menor que `umbralActivacion`.
+ * - `activa` es booleano y, en modo "automatico", debe ser true: una regla
+ *   inactiva dejaría al ventilador sin control, porque en ese modo se
+ *   rechazan los comandos manuales. Con "mixto" sí puede ser false.
  *
  * @param {Object} datos
  * @param {string} datos.ventiladorId Ventilador al que aplica la regla.
  * @param {string} datos.modoControl Uno de FAN_CONTROL_MODE.
- * @param {number} datos.margenHisteresis Banda de histéresis.
+ * @param {string} [datos.variable] ENVIRONMENTAL_VARIABLES; obligatorio salvo
+ * en modo manual.
+ * @param {number} [datos.umbralActivacion] Valor de activación; obligatorio
+ * salvo en modo manual.
+ * @param {number} [datos.margenHisteresis] Banda de histéresis; obligatorio
+ * salvo en modo manual.
+ * @param {boolean} [datos.activa] Si la regla está activa; obligatorio salvo
+ * en modo manual.
  * @returns {Promise<Object>}
  */
 export const guardarRegla = async (datos) => {
