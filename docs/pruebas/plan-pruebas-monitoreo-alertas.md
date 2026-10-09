@@ -17,6 +17,10 @@ simulador MQTT -> Servicio de Integración IoT -> procesarMedicion (Cloud Functi
   -> panel general (/dashboard): tarjetas, estado general y resumen de incubadoras
 Configuración de límites (umbrales): /configuracion/limites (solo administrador)
 Desconexión: el Servicio de Integración marca el dispositivo "desconectado"
+  -> crea alertas/{id} de tipo "dispositivo_desconectado" (estado "activa")
+  -> notificarAlerta -> correo, banner, listado y detalle (igual que arriba)
+  -> la resuelve solo cuando el dispositivo lleva 60 s conectado sin cortes
+     (estado "resuelta", ver sección 9)
 ```
 
 > **Estado de este plan: Plan documentado; ejecución pendiente (requiere
@@ -46,15 +50,22 @@ Desconexión: el Servicio de Integración marca el dispositivo "desconectado"
   `feat/sprint-3-deteccion-desconexion`; al redactar este plan todavía no
   estaba integrada en `main`). Sin ese cambio ningún proceso marca
   dispositivos como `desconectado`.
+- Para los casos 9.10 a 9.18 y 11.14: la alerta de desconexión del Servicio de
+  Integración (creación sin duplicados y resolución por reconexión estable,
+  rama `feat/sprint-3-alerta-desconexion`) y su presentación en la interfaz,
+  es decir, el detalle de la alerta sin variable, valor ni límite y con el
+  bloque "El dispositivo volvió a comunicarse" (rama
+  `feat/sprint-3-alerta-desconexion-ui`), o `main` una vez integradas. Sin el
+  primer cambio la desconexión no genera ninguna alerta.
 
 ### 0.2 Firebase
 
 | Elemento | Qué debe estar listo |
 | -------- | -------------------- |
-| Cloud Functions | Desplegadas `procesarMedicion` (HTTPS, con la resolución automática de alertas de `evaluarUmbrales`), `notificarAlerta` (trigger `onCreate` de `alertas/{alertaId}`), `gestionarUsuario`, `gestionarIncubadora` y `crearDispositivo`. |
+| Cloud Functions | Desplegadas `procesarMedicion` (HTTPS, con la resolución automática de alertas de `evaluarUmbrales`), `notificarAlerta` (trigger `onCreate` de `alertas/{alertaId}`), `gestionarUsuario`, `gestionarIncubadora` y `crearDispositivo`. `notificarAlerta` también envía el correo de las alertas de desconexión. |
 | `INTEGRATION_SERVICE_TOKEN` | Configurado en las Cloud Functions; `procesarMedicion` responde `403` si el token no coincide. Debe ser el mismo valor que `PROCESAR_MEDICION_TOKEN` del Servicio de Integración. |
 | Reglas | `firestore.rules` desplegadas: `umbrales` (lectura autenticada, escritura solo administrador) y `alertas` (actualización solo administrador u operador, únicamente el campo `estado`, únicamente hacia `reconocida` o `resuelta`). |
-| Índices | `firestore.indexes.json` desplegado. Las consultas de monitoreo (`mediciones`, `alertas`, `umbrales`, `dispositivos`) no necesitan índices compuestos; el único índice declarado es el de `ordenes_ventilador`. |
+| Índices | `firestore.indexes.json` desplegado. Las consultas de monitoreo (`mediciones`, `alertas`, `umbrales`, `dispositivos`) no necesitan índices compuestos; el único índice declarado es el de `ordenes_ventilador`. Las consultas del Servicio de Integración sobre `alertas` (dispositivo + tipo + estado) usan solo filtros de igualdad, así que tampoco necesitan uno. |
 | Extensión Trigger Email | Instalada (`firebase/firestore-send-email`), con la colección de correos `mail`, el servidor SMTP y el remitente por defecto configurados (ver `docs/notificaciones.md`). Sin ella las alertas se crean y se ven en la aplicación, pero no llega ningún correo. |
 | Usuarios | Un `administrador` activo con `correo` válido y que pueda leer su bandeja, un `operador` y un usuario de `consulta`, todos activos y con su custom claim `role` correcto (ver `docs/pruebas/plan-pruebas-autenticacion.md` y `docs/bootstrap-admin.md`). |
 
@@ -85,7 +96,10 @@ Dentro de `iot-integration-service/` (una sola vez: `npm install`):
   `GOOGLE_APPLICATION_CREDENTIALS` (ruta al JSON de la cuenta de servicio de
   Firebase, guardado fuera del repositorio). Ver `docs/broker-mqtt.md`.
 - Opcionales de la detección de desconexión: `LATIDO_TIMEOUT_SEGUNDOS` (30 por
-  defecto), `LATIDO_REVISION_SEGUNDOS` (5) y `LATIDO_REFRESCO_SEGUNDOS` (60).
+  defecto), `LATIDO_REVISION_SEGUNDOS` (5), `LATIDO_REFRESCO_SEGUNDOS` (60) y
+  `LATIDO_ESTABILIDAD_SEGUNDOS` (60, tiempo conectado sin cortes para resolver
+  la alerta de desconexión). Los casos de la sección 9 suponen los valores por
+  defecto.
 - Terminal 1, Servicio de Integración: `npm start`. Esperado en el log:
   `[iot-integration-service] Conectado a <host>:<puerto>` y la suscripción a
   los tópicos de mediciones, estado de ventiladores y latidos.
@@ -168,6 +182,11 @@ realmente quedó dentro de la banda; si no, repetir el caso con el último
 valor.
 
 ## 1. Medición dentro del rango
+
+Antes de las secciones 1 a 8, comprobar que no quedan alertas de desconexión
+abiertas de pruebas anteriores (sección 9): cuentan como alertas abiertas en
+"Estado general" y en los contadores del listado. Se resuelven solas cuando el
+dispositivo lleva 60 segundos conectado (caso 9.14).
 
 | Caso | Pasos | Resultado esperado |
 | ---- | ----- | -------------------- |
@@ -276,11 +295,21 @@ cada una con "Mínimo" y "Máximo" y su propio botón ("Guardar temperatura" /
 
 ## 9. Desconexión de dispositivo
 
-Requiere el Servicio de Integración con la detección de desconexión (ver 0.1).
+Requiere el Servicio de Integración con la detección de desconexión y con la
+alerta de desconexión (ver 0.1). Cubre RF-016 (informar cuando un sensor deja
+de comunicarse): además de marcar el dispositivo `desconectado`, el servicio
+crea una alerta `dispositivo_desconectado` (sin duplicados mientras haya una
+abierta) que sigue el mismo camino que las de umbral (correo, banner, listado y
+detalle) y la resuelve cuando el dispositivo lleva 60 segundos conectado sin
+cortes (`LATIDO_ESTABILIDAD_SEGUNDOS`), no en cuanto vuelve a dar señales.
+
 Tanto los latidos como las mediciones válidas cuentan como señal de vida, por
 lo que para provocar la desconexión hay que **detener el simulador completo**
 (Ctrl+C): detener solo los latidos no alcanza mientras sigan llegando
-mediciones. El Servicio de Integración tiene que seguir corriendo.
+mediciones. El Servicio de Integración tiene que seguir corriendo. El simulador
+publica latidos del sensor y del ventilador, así que **cada dispositivo genera
+su propia alerta**: al detener el simulador completo se crean dos alertas (y
+dos correos por administrador).
 
 | Caso | Pasos | Resultado esperado |
 | ---- | ----- | -------------------- |
@@ -290,10 +319,18 @@ mediciones. El Servicio de Integración tiene que seguir corriendo.
 | 9.4 | Mirar el panel general sin recargar. | La tarjeta "Estado de conexión" pasa a "Desconectado" (con la hora relativa de la última comunicación); la tarjeta "Ventiladores" indica "1 sin conexión."; "Estado general" pasa a "Crítico"; el resumen cuenta la incubadora como "Crítico". |
 | 9.5 | Con la incubadora desconectada **y** una alerta abierta (`activa` o `reconocida`) a la vez. | "Estado general" sigue en "Crítico": un dispositivo desconectado tiene prioridad sobre la alerta abierta (sea `activa` o `reconocida`). |
 | 9.6 | Con dos incubadoras (0.3, punto 4), cada una con su propio simulador (ids propios en las variables `SIMULADOR_*`), detener solo el simulador de una de ellas. | El resumen cuenta una incubadora en "Crítico" y la otra en "Normal" (o "Advertencia" si tiene una alerta abierta); el total de incubadoras no cambia. |
-| 9.7 | Volver a iniciar el simulador. | En el siguiente latido o medición el servicio marca el dispositivo de nuevo como `conectado` (log `Dispositivo "<id>" conectado (...)`). El panel vuelve a "Conectado" y "Estado general" a "Normal" (o "Advertencia" si hay una alerta abierta), sin recargar. |
-| 9.8 | Reiniciar el Servicio de Integración con el simulador detenido, partiendo de un dispositivo que había quedado `conectado` en Firestore. | El servicio lo recupera al arrancar y le da un margen de 30 segundos desde el arranque; si no recibe señales en ese lapso lo marca `desconectado`. |
-| 9.9 | Con el Servicio de Integración detenido y el simulador apagado, esperar más de 30 segundos. | Nadie marca los dispositivos como desconectados: siguen `conectado` en Firestore. Es una limitación conocida (la detección corre dentro del servicio). |
-| 9.10 | Revisar la colección `alertas` después de 9.2. | No se crea ninguna alerta por la desconexión: en esta versión la desconexión solo cambia `estadoConexion` (el tipo `dispositivo_desconectado` existe en `ALERT_TYPES`, pero no se genera automáticamente). |
+| 9.7 | Volver a iniciar el simulador. | En el siguiente latido o medición el servicio marca el dispositivo de nuevo como `conectado` (log `Dispositivo "<id>" conectado (...)`). La tarjeta "Estado de conexión" vuelve a "Conectado" sin recargar. Como las alertas de desconexión siguen abiertas hasta cumplirse la ventana de 60 s (caso 9.14), "Estado general" pasa a "Advertencia" y no a "Normal"; vuelve a "Normal" (o sigue en "Advertencia" si hay otra alerta abierta) cuando se resuelven. |
+| 9.8 | Reiniciar el Servicio de Integración con el simulador detenido, partiendo de un dispositivo que había quedado `conectado` en Firestore. | El servicio lo recupera al arrancar y le da un margen de 30 segundos desde el arranque; si no recibe señales en ese lapso lo marca `desconectado` y crea la alerta de desconexión (si ya había una abierta del dispositivo, no crea otra). La incubadora de la alerta sale de `dispositivos/<id>.incubadoraId` y su `ultimaSenalEn` es el momento del arranque del servicio, no la última señal real. |
+| 9.9 | Con el Servicio de Integración detenido y el simulador apagado, esperar más de 30 segundos. | Nadie marca los dispositivos como desconectados ni se crea ninguna alerta: los dispositivos siguen `conectado` en Firestore. Es una limitación conocida (la detección corre dentro del servicio). |
+| 9.10 | Después de 9.2, revisar la colección `alertas` (sin alertas de desconexión abiertas antes de empezar). | Hay **una** alerta nueva por cada dispositivo desconectado (el sensor y el ventilador simulados) con exactamente: `incubadoraId`, `dispositivoId`, `tipo: "dispositivo_desconectado"`, `estado: "activa"`, `titulo: "Dispositivo desconectado"`, `mensaje` ("El dispositivo <id> dejó de enviar señales hace más de 30 segundos."), `ultimaSenalEn` (timestamp cercano al último latido) y `creadaEn`. **No** tienen `variable`, `valor`, `limite` ni `medidoEn`. En el log del servicio: `Alerta de desconexión creada para "<id>".`. |
+| 9.11 | Con las alertas de 9.10 abiertas, dejar los dispositivos desconectados varios minutos (varios ciclos de revisión de 5 s). Después marcar una de las alertas como `reconocida` (sección 7) y esperar otros minutos. | No se crea ninguna alerta nueva: sigue habiendo una por dispositivo. Una alerta `reconocida` también cuenta como abierta. |
+| 9.12 | Después de 9.10, revisar la colección `mail`. | Por cada alerta de desconexión y por cada `administrador` activo con `correo` válido hay un documento con `message.subject` "Dispositivo desconectado" y `message.text` igual al `mensaje` de la alerta (sin textos "undefined" ni "NaN"). Con el simulador completo detenido cada administrador recibe dos correos, uno por dispositivo. El `operador` y el usuario de `consulta` no reciben ninguno (4.4). |
+| 9.13 | Con la aplicación abierta en `/dashboard` (sin recargar) cuando se crea la alerta, y luego en `/alertas`. | Aparece el banner con el `titulo` y el `mensaje` de la alerta; "Ver alerta" abre `/alertas/<id>`. En el listado la tarjeta muestra el ícono 📡 con borde de advertencia, el título, el mensaje, el estado "Activa" y la fecha de creación, sin textos "undefined" ni "NaN" ni filas vacías; los contadores del filtro "Activas" la incluyen. Como `administrador` u `operador`, el detalle muestra "Incubadora", "Dispositivo" (el `dispositivoId`), "Sin señales desde" (fecha y hora de `ultimaSenalEn`), "Tipo" ("Dispositivo desconectado"), "Estado" y "Generada el"; **no** muestra "Variable", "Valor registrado" ni "Límite excedido". Al pulsar "Marcar como reconocida" pasa a "Reconocida" y el banner desaparece (7.2 y 5.5); con `consulta` el botón no aparece (7.4). |
+| 9.14 | Con una alerta de 9.10 `activa`, volver a iniciar el simulador y anotar la hora T de la primera señal. Revisar `dispositivos/<id>` y `alertas` a T + 30 s, a T + 50 s y a partir de T + 75 s (la estabilidad se mide con las señales recibidas, así que la alerta se resuelve con la primera señal que cumple los 60 s y la comprobación corre en la revisión de 5 s). | El dispositivo vuelve a `conectado` de inmediato, pero antes de T + 60 s la alerta sigue `activa` (sin `resueltaEn`). Con los latidos del simulador cada 8 s se resuelve alrededor de T + 64 a T + 70 s (hasta un período de latido más que los 60 s configurados): pasa a `estado: "resuelta"` con `resueltaEn` (timestamp) y `resueltaPor: "sistema"`; no se agrega `valorResolucion` ni cambia ningún otro campo. En el log: `Alerta de desconexión de "<id>" resuelta (el dispositivo volvió a comunicarse).`. No se crea alerta nueva ni documento en `mail`. |
+| 9.15 | Repetir 9.14 pero con la alerta marcada `reconocida` antes de reconectar el simulador. | También pasa a `resuelta` con `resueltaEn` y `resueltaPor: "sistema"`, pasados unos 60 s de conexión estable (alrededor de T + 64 a T + 70 s con el simulador). |
+| 9.16 | Abrir `/alertas/<id>` de una alerta resuelta por 9.14, y luego `/alertas`. | El estado muestra "Resuelta" y debajo de la lista aparece el bloque con "Resuelta automáticamente", la fecha y hora de `resueltaEn` y la línea "El dispositivo volvió a comunicarse" (**no** "La medición volvió a ..."). Se sigue sin mostrar "Variable", "Valor registrado" ni "Límite excedido", y no aparece el botón "Marcar como reconocida". La alerta aparece bajo el filtro "Resueltas" y deja de contar en "Activas" y "Reconocidas". |
+| 9.17 | Dispositivo intermitente: con una alerta abierta, iniciar el simulador, dejarlo corriendo menos de 60 s (por ejemplo 15 s, 40 s y 55 s en tres ciclos distintos) y detenerlo; esperar a que el servicio vuelva a marcar `desconectado` (más de 30 s sin señales) antes de cada ciclo siguiente. | Los dispositivos pasan varias veces a `conectado` y `desconectado`, pero sigue habiendo una sola alerta abierta por dispositivo (la misma, sin pasar a `resuelta`), no se crea ninguna alerta nueva y la colección `mail` no recibe documentos nuevos: un solo correo por dispositivo. Tras estabilizarse (simulador corriendo más de 60 s) la alerta se resuelve (9.14). |
+| 9.18 | Reinicio con una alerta abierta: partiendo de 9.10 (alertas `activa`), detener el Servicio de Integración, iniciar el simulador y volver a iniciar el servicio. Anotar la hora de arranque. | Pasados unos 60 s del arranque con el dispositivo enviando señales, las alertas que quedaron abiertas pasan a `resuelta` (`resueltaPor: "sistema"`), aunque el servicio se haya reiniciado entre medio. Lo mismo ocurre con un dispositivo que ya figuraba `conectado` en Firestore al reiniciar. No se crean alertas nuevas ni correos. |
 
 ## 10. Resumen por incubadora (estado general)
 
@@ -324,8 +361,9 @@ resolver una alerta. En todos los casos, antes de empezar, dejar la colección
 | 11.9 | Con el panel general abierto sin recargar: provocar una alerta `temperatura_alta`; luego reconocerla (sección 7); luego guardar límites amplios y esperar la siguiente medición. | Con la alerta `activa`, "Estado general" y el resumen muestran "Advertencia". Tras reconocerla, siguen en "Advertencia" (la alerta está abierta mientras el valor siga fuera de rango). Solo después de la resolución automática vuelven a "Normal". |
 | 11.10 | Abrir `/alertas/<id>` de una alerta resuelta automáticamente (11.1). | El estado muestra "Resuelta" y debajo de la lista de datos aparece un bloque con el texto "Resuelta automáticamente", la fecha y hora de `resueltaEn` y la línea "La medición volvió a <valorResolucion> °C" (o "%" para humedad). No aparece el botón "Marcar como reconocida". |
 | 11.11 | Abrir el detalle de una alerta `activa` y el de una `reconocida`. | No aparece el bloque de resolución. |
-| 11.12 | En la consola de Firestore, cambiar a mano `estado` de una alerta a `resuelta` (sin `resueltaPor`, `resueltaEn` ni `valorResolucion`) y abrir su detalle. | El bloque muestra solo "Resuelta" (sin "automáticamente"), la fecha como "-" y no muestra la línea "La medición volvió a ...". No hay errores en la consola del navegador. |
+| 11.12 | En la consola de Firestore, cambiar a mano `estado` de una alerta a `resuelta` (sin `resueltaPor`, `resueltaEn` ni `valorResolucion`) y abrir su detalle. Repetir con una alerta de desconexión. | El bloque muestra solo "Resuelta" (sin "automáticamente"), la fecha como "-" y no muestra la línea "La medición volvió a ..." (ni "El dispositivo volvió a comunicarse" en la de desconexión). No hay errores en la consola del navegador. |
 | 11.13 | Abrir `/alertas` después de 11.1 y 11.3. | Las alertas resueltas aparecen bajo el filtro "Resueltas" y ya no bajo "Activas" ni "Reconocidas"; los contadores se actualizan solos. |
+| 11.14 | Con una alerta de desconexión abierta (volver a iniciar el simulador tras 9.10 y actuar dentro de los primeros 60 s de conexión), guardar los límites de `temperatura_alta` (0.6) y esperar la siguiente medición; luego guardar límites amplios (0.7) y esperar otra. | Se crea la alerta `temperatura_alta` y, después, `evaluarUmbrales` la resuelve con `valorResolucion` (11.1). La alerta de desconexión no se ve afectada por la resolución por umbrales: no recibe `valorResolucion` y sigue abierta hasta que se cumplen sus 60 s de conexión estable (9.14), momento en que la resuelve el Servicio de Integración. El tipo `dispositivo_desconectado` no tiene `variable`, así que ninguna medición la evalúa. |
 
 ## 12. Registro de resultados
 
@@ -400,9 +438,17 @@ Firestore.
 | 9.5 | Prioridad de "Crítico" sobre la alerta abierta | | |
 | 9.6 | Resumen con una incubadora desconectada | | |
 | 9.7 | Reconexión restaura el estado | | |
-| 9.8 | Recuperación al reiniciar el servicio | | |
-| 9.9 | Servicio detenido: nadie marca la desconexión | | |
-| 9.10 | La desconexión no genera alerta | | |
+| 9.8 | Recuperación al reiniciar el servicio (y alerta si no hay señales) | | |
+| 9.9 | Servicio detenido: nadie marca la desconexión ni crea alertas | | |
+| 9.10 | La desconexión crea una alerta con los campos esperados (sin variable, valor, límite ni medidoEn) | | |
+| 9.11 | Sin alertas duplicadas mientras haya una abierta (`activa` o `reconocida`) | | |
+| 9.12 | Un correo por alerta de desconexión y administrador activo | | |
+| 9.13 | Banner, listado y detalle de la alerta sin "undefined" ni "NaN" | | |
+| 9.14 | Reconexión estable (60 s) resuelve la alerta `activa` sola | | |
+| 9.15 | Reconexión estable resuelve la alerta `reconocida` | | |
+| 9.16 | Detalle de la alerta resuelta: "El dispositivo volvió a comunicarse" | | |
+| 9.17 | Dispositivo intermitente: una sola alerta y un solo correo | | |
+| 9.18 | Reinicio del servicio con una alerta abierta | | |
 | 10.1 | Resumen con dos incubadoras | | |
 | 10.2 | Alerta en una sola incubadora | | |
 | 10.3 | Incubadora inactiva fuera del resumen | | |
@@ -420,6 +466,7 @@ Firestore.
 | 11.11 | Detalle sin bloque de resolución en alertas abiertas | | |
 | 11.12 | Detalle de una alerta resuelta a mano (sin campos de resolución) | | |
 | 11.13 | Listado: alertas resueltas bajo el filtro "Resueltas" | | |
+| 11.14 | La resolución por umbrales no afecta a las alertas de desconexión | | |
 
 ## Notas
 
@@ -445,10 +492,21 @@ Firestore.
   `estado: "resuelta"` desde un cliente (caso 7.7, inciso c); el cambio manual
   en la consola del caso 11.12 sirve solo para probar el detalle con una
   alerta sin campos de resolución.
-- La resolución solo ocurre al procesar una medición nueva de esa incubadora y
-  variable: si el dispositivo deja de enviar mediciones (por ejemplo, está
-  desconectado), una alerta abierta no se resuelve aunque se amplíen los
-  límites.
+- La resolución de alertas de umbral solo ocurre al procesar una medición nueva
+  de esa incubadora y variable: si el dispositivo deja de enviar mediciones (por
+  ejemplo, está desconectado), una alerta abierta no se resuelve aunque se
+  amplíen los límites. Las alertas de desconexión no dependen de las
+  mediciones: las resuelve el Servicio de Integración tras 60 s de conexión
+  estable (sección 9).
+- Alerta de desconexión: si falla la escritura de la alerta (error de
+  Firestore) el servicio lo registra una sola vez en su log y reintenta crearla
+  en cada ciclo mientras el dispositivo siga `desconectado`, sin crear
+  duplicados. Si el dispositivo vuelve a comunicarse antes de que se cree, esa
+  caída queda sin alerta y la próxima caída avisa con normalidad. Este fallo es
+  difícil de provocar a mano (el Admin SDK ignora las reglas de Firestore), por
+  lo que este plan no incluye un caso manual para él. Una alerta resuelta no
+  vuelve a abrirse: una caída posterior crea una alerta nueva (y un correo
+  nuevo).
 - El resumen y el "Estado general" del panel consideran como máximo las 200
   alertas abiertas (`activa` o `reconocida`) más recientes: una alerta abierta
   más antigua que esas 200 no se cuenta. No afecta a las pruebas de este plan.

@@ -5,6 +5,7 @@ import alertasRepository from "../../repositories/alertasRepository";
 import incubadorasRepository from "../../repositories/incubadorasRepository";
 import {
   ALERT_STATUS,
+  ALERT_TYPES,
   ENVIRONMENTAL_VARIABLES,
   MESSAGES,
   ROUTES,
@@ -180,6 +181,10 @@ const AlertaDetalle = () => {
   const puedeReconocer =
     alerta.estado === ALERT_STATUS.ACTIVE && canManageAlerts(usuario);
 
+  // La alerta de desconexión no tiene variable, valor ni límite: se
+  // muestra el dispositivo y desde cuándo no envía señales.
+  const esDesconexion = alerta.tipo === ALERT_TYPES.DEVICE_DISCONNECTED;
+
   return (
     <section className="page alerta-detalle-page">
       {volver}
@@ -211,20 +216,40 @@ const AlertaDetalle = () => {
             <dd>{nombreIncubadora}</dd>
           </div>
 
-          <div className="alerta-detalle__fila">
-            <dt>Variable</dt>
-            <dd>{capitalize(alerta.variable) || "-"}</dd>
-          </div>
+          {esDesconexion ? (
+            <>
+              <div className="alerta-detalle__fila">
+                <dt>Dispositivo</dt>
+                <dd>{alerta.dispositivoId || "-"}</dd>
+              </div>
 
-          <div className="alerta-detalle__fila">
-            <dt>Valor registrado</dt>
-            <dd>{formatearSegunVariable(alerta.variable, alerta.valor)}</dd>
-          </div>
+              <div className="alerta-detalle__fila">
+                <dt>Sin señales desde</dt>
+                <dd>{formatDateTime(alerta.ultimaSenalEn)}</dd>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="alerta-detalle__fila">
+                <dt>Variable</dt>
+                <dd>{capitalize(alerta.variable) || "-"}</dd>
+              </div>
 
-          <div className="alerta-detalle__fila">
-            <dt>Límite excedido</dt>
-            <dd>{formatearSegunVariable(alerta.variable, alerta.limite)}</dd>
-          </div>
+              <div className="alerta-detalle__fila">
+                <dt>Valor registrado</dt>
+                <dd>
+                  {formatearSegunVariable(alerta.variable, alerta.valor)}
+                </dd>
+              </div>
+
+              <div className="alerta-detalle__fila">
+                <dt>Límite excedido</dt>
+                <dd>
+                  {formatearSegunVariable(alerta.variable, alerta.limite)}
+                </dd>
+              </div>
+            </>
+          )}
 
           <div className="alerta-detalle__fila">
             <dt>Tipo</dt>
@@ -254,7 +279,13 @@ const AlertaDetalle = () => {
               {formatDateTime(alerta.resueltaEn)}
             </p>
 
-            {typeof alerta.valorResolucion === "number" && (
+            {esDesconexion && alerta.resueltaPor === RESUELTA_POR_SISTEMA && (
+              <p className="alerta-detalle__resolucion-texto">
+                El dispositivo volvió a comunicarse
+              </p>
+            )}
+
+            {!esDesconexion && typeof alerta.valorResolucion === "number" && (
               <p className="alerta-detalle__resolucion-texto">
                 La medición volvió a{" "}
                 {formatearSegunVariable(
