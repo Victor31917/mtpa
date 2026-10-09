@@ -190,15 +190,16 @@ la afecta.
 
 Representa un ventilador de una incubadora. Es el documento que lee la Cloud
 Function `enviarComandoVentilador` antes de crear una orden. Ningún cliente lo
-escribe (ver `firestore.rules`): lo crea la Cloud Function `crearDispositivo` y
-está previsto que el Servicio de Integración IoT actualice el estado con Admin
-SDK (Sprint 4, tarea [10]; hoy nada lo escribe).
+escribe (ver `firestore.rules`): lo crea la Cloud Function `crearDispositivo`,
+`guardarReglaAutomatizacion` cambia su `modoControl` y está previsto que el
+Servicio de Integración IoT actualice el estado con Admin SDK (Sprint 4, tarea
+[10]; hoy nada lo escribe).
 
 | Campo          | Tipo     | Descripción                                                                 |
 | -------------- | -------- | ------------------------------------------------------------------------------ |
 | `incubadoraId` | `string` | Incubadora a la que pertenece (`incubadoras/{id}`). Se copia a cada orden.      |
 | `dispositivoId`| `string` | Dispositivo físico asociado (`dispositivos/{id}`, tipo `ventilador`). Junto con `incubadoraId` arma el tópico MQTT del comando (ver `docs/contrato-mqtt.md`). Se copia a cada orden. |
-| `modoControl`  | `string` | Uno de los valores de `FAN_CONTROL_MODE` (`manual`, `automatico`, `mixto`). `enviarComandoVentilador` solo acepta comandos manuales en `manual` y `mixto`. Nace en `manual`. |
+| `modoControl`  | `string` | Uno de los valores de `FAN_CONTROL_MODE` (`manual`, `automatico`, `mixto`). `enviarComandoVentilador` solo acepta comandos manuales en `manual` y `mixto`. Nace en `manual`. Solo se cambia con `guardarReglaAutomatizacion` (ver `reglas_automatizacion`). |
 | `estadoActual` | `string \| null` | Uno de los valores de `FAN_STATUS` (`encendido`, `apagado`). Nace en `null` (estado desconocido). Está previsto que el Servicio de Integración lo escriba al recibir la confirmación del dispositivo (Sprint 4, tarea [10]); hoy nada lo escribe, así que permanece en `null`. |
 | `creadoEn`     | `timestamp` | Fecha de creación (server timestamp).                                       |
 
@@ -248,6 +249,50 @@ SDK (Sprint 4, tarea [10]; hoy nada lo escribe).
   sin `incubadoraId` válido se omite y se informa. Las credenciales se
   obtienen como en `docs/bootstrap-admin.md`.
 
+## `reglas_automatizacion/{ventiladorId}` (Sprint 4)
+
+Regla de histéresis que decide cuándo encender o apagar automáticamente un
+ventilador según una variable ambiental de su incubadora. Hay **una regla por
+ventilador**: el id del documento es el id del ventilador (`ventiladores/{id}`).
+Ningún cliente la escribe (ver `firestore.rules`); solo se puede leer.
+
+| Campo              | Tipo        | Descripción                                                                 |
+| ------------------ | ----------- | ------------------------------------------------------------------------------ |
+| `ventiladorId`     | `string`    | Ventilador al que aplica (igual al id del documento).                           |
+| `incubadoraId`     | `string`    | Copiado de `ventiladores/{ventiladorId}`. La evaluación busca las reglas por incubadora y variable. |
+| `variable`         | `string`    | Variable que se compara: `temperatura` o `humedad`.                             |
+| `umbralActivacion` | `number`    | Valor desde el cual el ventilador debe estar encendido (`valor >= umbralActivacion`). |
+| `margenHisteresis` | `number`    | Ancho de la banda de histéresis: el ventilador debe estar apagado desde `umbralActivacion - margenHisteresis` hacia abajo. Entre ambos límites no se hace nada. Siempre `> 0` y `< umbralActivacion`. |
+| `activa`           | `boolean`   | Si es `false`, la regla se conserva pero no se evalúa.                          |
+| `actualizadoEn`    | `timestamp` | Última vez que se guardó la regla (server timestamp).                           |
+| `actualizadoPor`   | `string`    | `uid` del administrador que la guardó.                                          |
+
+### Cómo se escribe
+
+Solo la Cloud Function callable `guardarReglaAutomatizacion` (únicamente
+`administrador`). Recibe `{ ventiladorId, modoControl, variable,
+umbralActivacion, margenHisteresis, activa }` y, **en un solo batch**, cambia
+`ventiladores/{ventiladorId}.modoControl` y crea o reemplaza la regla. Es el
+único camino para cambiar el modo de control de un ventilador: nadie más lo
+escribe, por eso la función recibe el modo y no se separó en dos callables
+(así nunca queda un ventilador en `automatico` o `mixto` sin regla).
+
+- **`automatico` o `mixto`.** Se validan todos los campos de la regla: `variable`
+  debe ser `temperatura` o `humedad`; `umbralActivacion` y `margenHisteresis`,
+  números finitos con `0 < margenHisteresis < umbralActivacion` (con otro margen
+  la regla oscilaría sin parar); `activa`, booleano. El ventilador debe existir
+  y tener `incubadoraId`. Si algo falla no se escribe nada.
+- **`manual`.** Solo cambia el modo. Los demás campos se ignoran y la regla
+  guardada se conserva (sin evaluarse mientras el modo sea `manual`).
+
+### Ciclo de vida
+
+La regla se crea la primera vez que el ventilador pasa a `automatico` o
+`mixto`. A partir de ahí solo se reemplaza con cada guardado; no se borra:
+volver a `manual` la deja guardada para reutilizarla. En modo `automatico` el
+ventilador solo acepta órdenes automáticas (`enviarComandoVentilador` rechaza las
+manuales); en `mixto` acepta ambas.
+
 ## `ordenes_ventilador/{ordenId}` (Sprint 4)
 
 Cada orden es una solicitud de encender o apagar un ventilador. La crea la
@@ -288,8 +333,8 @@ alternativas finales son `fallida` y `expirada`.
 
 ## Notas generales
 
-- Las colecciones `reglas_automatizacion`, `estadisticas_diarias`,
-  `auditoria` y `config_sistema` están enumeradas en `COLLECTIONS` para uso
+- Las colecciones `estadisticas_diarias`, `auditoria` y `config_sistema`
+  están enumeradas en `COLLECTIONS` para uso
   futuro; este documento se irá completando a medida que se implementen.
 - Ninguna de estas colecciones debe recibir escrituras directas desde el
   cliente para datos que representen el estado real del sistema (mediciones,
