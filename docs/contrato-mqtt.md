@@ -90,13 +90,19 @@ otra.
   comunicarse se marca `"conectado"` de inmediato, pero la alerta no se
   resuelve hasta que lleva **60 segundos** conectado sin cortes
   (`LATIDO_ESTABILIDAD_SEGUNDOS`). La comprobación la hace el watchdog, no cada
-  latido, y marca la alerta como `resuelta` (`resueltaPor: "sistema"`). Así, un
-  dispositivo con conexión intermitente mantiene una sola alerta abierta y no
-  genera un correo por cada corte. Si vuelve a caerse antes de ese tiempo, la
-  alerta sigue abierta y no se crea otra.
+  latido, y marca la alerta como `resuelta` (`resueltaPor: "sistema"`). La
+  estabilidad se mide con las señales realmente recibidas (entre la primera
+  señal tras la caída y la última recibida), no con el reloj: los 30 segundos
+  que el dispositivo sigue figurando `"conectado"` tras su última señal no
+  cuentan. Por eso la alerta se resuelve con la primera señal que cumple la
+  ventana, y puede tardar hasta un período de latido más que los 60 segundos
+  configurados (con latidos cada 8 s, alrededor de 64 s). Así, un dispositivo
+  con conexión intermitente mantiene una sola alerta abierta y no genera un
+  correo por cada corte. Si vuelve a caerse antes de ese tiempo, la alerta
+  sigue abierta y no se crea otra.
 - **Reinicio del servicio.** Las alertas que quedaron abiertas mientras el
   servicio estaba apagado se resuelven del mismo modo cuando el dispositivo
-  lleva 60 segundos estable tras el arranque.
+  envía señales durante 60 segundos tras el arranque.
 - **Limitación.** Como la detección corre dentro del servicio, si este está
   caído no se detecta ninguna desconexión ni se crea ninguna alerta. Si falla
   la escritura de la alerta, solo se registra en el log: el estado

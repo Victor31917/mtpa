@@ -163,7 +163,10 @@ function crearRastreadorConexion({
   // "revisarAlerta" indica que puede haber una alerta de desconexión
   // abierta por resolver (arranca en true y vuelve a true al
   // desconectarse); "conectadoDesde" es el momento en que pasó a
-  // "conectado", para medir la estabilidad.
+  // "conectado". La estabilidad se mide con las señales realmente
+  // recibidas (ultimaSenal - conectadoDesde), no con el reloj: el
+  // dispositivo sigue "conectado" hasta 30 s después de su última señal
+  // y ese margen no cuenta como tiempo estable.
   const dispositivos = new Map();
 
   // dispositivoId -> ms hasta el que se ignora (no existe en Firestore).
@@ -503,7 +506,7 @@ function crearRastreadorConexion({
           if (
             entrada.revisarAlerta &&
             !entrada.resolviendo &&
-            t - entrada.conectadoDesde >= estabilidadMs
+            entrada.ultimaSenal - entrada.conectadoDesde >= estabilidadMs
           ) {
             entrada.resolviendo = true;
 
@@ -513,7 +516,7 @@ function crearRastreadorConexion({
                   // Puede haberse caído mientras esperaba en la cola.
                   if (
                     entrada.estado !== CONECTADO ||
-                    ahora() - entrada.conectadoDesde < estabilidadMs
+                    entrada.ultimaSenal - entrada.conectadoDesde < estabilidadMs
                   ) {
                     return;
                   }
