@@ -21,7 +21,12 @@ import {
 import { canManageAlerts } from "../../utils/permissions";
 import "./AlertaDetalle.css";
 
-// Formatea "valor" y "limite" con la unidad de la variable de la alerta.
+// Valor de "resueltaPor" cuando la alerta la resuelve automáticamente
+// evaluarUmbrales (Cloud Function "procesarMedicion").
+const RESUELTA_POR_SISTEMA = "sistema";
+
+// Formatea "valor", "limite" y "valorResolucion" con la unidad de la
+// variable de la alerta.
 const formatearSegunVariable = (variable, valor) => {
   if (variable === ENVIRONMENTAL_VARIABLES.TEMPERATURE) {
     return formatTemperature(valor);
@@ -236,6 +241,30 @@ const AlertaDetalle = () => {
             <dd>{formatDateTime(alerta.creadaEn)}</dd>
           </div>
         </dl>
+
+        {alerta.estado === ALERT_STATUS.RESOLVED && (
+          <div className="alerta-detalle__resolucion">
+            <p className="alerta-detalle__resolucion-titulo">
+              {alerta.resueltaPor === RESUELTA_POR_SISTEMA
+                ? "Resuelta automáticamente"
+                : "Resuelta"}
+            </p>
+
+            <p className="alerta-detalle__resolucion-texto">
+              {formatDateTime(alerta.resueltaEn)}
+            </p>
+
+            {typeof alerta.valorResolucion === "number" && (
+              <p className="alerta-detalle__resolucion-texto">
+                La medición volvió a{" "}
+                {formatearSegunVariable(
+                  alerta.variable,
+                  alerta.valorResolucion
+                )}
+              </p>
+            )}
+          </div>
+        )}
 
         {errorAccion && (
           <div className="message message--danger" role="alert">

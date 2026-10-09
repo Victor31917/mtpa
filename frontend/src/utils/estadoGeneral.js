@@ -7,21 +7,25 @@ import { DEVICE_STATUS, STATUS } from "./constants";
 
 /**
  * Calcula el estado general de UNA incubadora a partir de sus
- * alertas activas y sus dispositivos (RF-017):
+ * alertas abiertas y sus dispositivos (RF-017):
  *
  * - "critico": algún dispositivo está "desconectado".
  * - "advertencia": no hay dispositivos desconectados, pero la
- *   incubadora tiene al menos una alerta activa.
+ *   incubadora tiene al menos una alerta abierta.
  * - "normal": en cualquier otro caso.
  *
+ * Una alerta abierta es la que está "activa" o "reconocida": una
+ * alerta reconocida sigue sin resolverse (el valor continúa fuera de
+ * rango) hasta que el sistema la marca "resuelta".
+ *
  * @param {Object} datos
- * @param {Object[]} [datos.alertasActivas] Alertas con estado "activa"
- * de ESTA incubadora.
+ * @param {Object[]} [datos.alertasAbiertas] Alertas con estado "activa"
+ * o "reconocida" de ESTA incubadora.
  * @param {Object[]} [datos.dispositivos] Dispositivos de ESTA incubadora.
  * @returns {"normal"|"advertencia"|"critico"} Valores de STATUS.
  */
 export const calcularEstadoGeneral = ({
-  alertasActivas = [],
+  alertasAbiertas = [],
   dispositivos = [],
 } = {}) => {
   const hayDesconectados = dispositivos.some(
@@ -33,7 +37,7 @@ export const calcularEstadoGeneral = ({
     return STATUS.CRITICAL;
   }
 
-  if (alertasActivas.length > 0) {
+  if (alertasAbiertas.length > 0) {
     return STATUS.WARNING;
   }
 

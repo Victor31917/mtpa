@@ -21,11 +21,10 @@ import { calcularEstadoGeneral } from "../../utils/estadoGeneral";
 
 import "./Dashboard.css";
 
-// Alertas activas leídas para el estado general. alertasRepository aplica
-// el límite ANTES de filtrar por estado: una alerta activa que no esté
-// entre las últimas LIMITE_ALERTAS_ACTIVAS alertas (de cualquier estado)
-// no se cuenta.
-const LIMITE_ALERTAS_ACTIVAS = 200;
+// Alertas abiertas (activas o reconocidas) leídas para el estado general.
+// alertasRepository filtra por estado en el servidor y aplica el límite
+// después: solo se cuentan las LIMITE_ALERTAS_ABIERTAS más recientes.
+const LIMITE_ALERTAS_ABIERTAS = 200;
 
 // Umbral configurado ({ minimo, maximo }) al formato { min, max } que
 // esperan TemperatureCard y HumidityCard; sin umbral no se resalta nada.
@@ -71,9 +70,9 @@ const Dashboard = () => {
   const [dispositivos, setDispositivos] = useState([]);
   const [umbrales, setUmbrales] = useState(null);
 
-  // Alertas activas y dispositivos de TODAS las incubadoras (null hasta
+  // Alertas abiertas y dispositivos de TODAS las incubadoras (null hasta
   // que llega el primer dato): alimentan el estado general y el resumen.
-  const [alertasActivas, setAlertasActivas] = useState(null);
+  const [alertasAbiertas, setAlertasAbiertas] = useState(null);
   const [todosDispositivos, setTodosDispositivos] = useState(null);
 
   const [cargando, setCargando] = useState(true);
@@ -152,16 +151,19 @@ const Dashboard = () => {
    * SUSCRIPCIONES GLOBALES (TODAS LAS INCUBADORAS)
    * =========================================================
    *
-   * Una sola suscripción a las alertas activas y otra a todos los
+   * Una sola suscripción a las alertas abiertas y otra a todos los
    * dispositivos (se asumen pocos): de ahí sale el estado general de
    * cada incubadora. Se cancelan ambas al desmontar el Dashboard.
    */
 
   useEffect(() => {
     const unsubscribeAlertas = alertasRepository.suscribirseAlertas(
-      { estado: ALERT_STATUS.ACTIVE, limite: LIMITE_ALERTAS_ACTIVAS },
+      {
+        estado: [ALERT_STATUS.ACTIVE, ALERT_STATUS.ACKNOWLEDGED],
+        limite: LIMITE_ALERTAS_ABIERTAS,
+      },
       (alertas) => {
-        setAlertasActivas(alertas);
+        setAlertasAbiertas(alertas);
       },
       (err) => {
         console.error("Error en la suscripción de alertas:", err);
@@ -386,21 +388,21 @@ const Dashboard = () => {
   const estadoGeneral = useMemo(() => {
     if (
       !incubadoraSeleccionada ||
-      alertasActivas === null ||
+      alertasAbiertas === null ||
       (!temperatura && !humedad && dispositivos.length === 0)
     ) {
       return "sin_datos";
     }
 
     return calcularEstadoGeneral({
-      alertasActivas: alertasActivas.filter(
+      alertasAbiertas: alertasAbiertas.filter(
         (alerta) => alerta.incubadoraId === incubadoraSeleccionada.id
       ),
       dispositivos,
     });
   }, [
     incubadoraSeleccionada,
-    alertasActivas,
+    alertasAbiertas,
     temperatura,
     humedad,
     dispositivos,
@@ -409,7 +411,7 @@ const Dashboard = () => {
   // Estado general de CADA incubadora, para el resumen (RF-017). Hasta
   // que llegan alertas y dispositivos no hay resumen que mostrar.
   const resumenIncubadoras = useMemo(() => {
-    if (alertasActivas === null || todosDispositivos === null) {
+    if (alertasAbiertas === null || todosDispositivos === null) {
       return null;
     }
 
@@ -417,7 +419,7 @@ const Dashboard = () => {
       id: incubadora.id,
       nombre: incubadora.nombre || incubadora.id,
       estadoGeneral: calcularEstadoGeneral({
-        alertasActivas: alertasActivas.filter(
+        alertasAbiertas: alertasAbiertas.filter(
           (alerta) => alerta.incubadoraId === incubadora.id
         ),
         dispositivos: todosDispositivos.filter(
@@ -425,7 +427,7 @@ const Dashboard = () => {
         ),
       }),
     }));
-  }, [incubadoras, alertasActivas, todosDispositivos]);
+  }, [incubadoras, alertasAbiertas, todosDispositivos]);
 
   /*
    * =========================================================

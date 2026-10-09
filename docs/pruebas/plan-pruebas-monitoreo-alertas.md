@@ -10,6 +10,8 @@ El flujo cubierto es:
 simulador MQTT -> Servicio de Integración IoT -> procesarMedicion (Cloud Function)
   -> mediciones/{id} + dispositivos/{id} (estadoConexion, ultimaComunicacionEn)
   -> evaluarUmbrales -> alertas/{id} (estado "activa")
+       (con cada medición también resuelve solo las alertas abiertas cuyo
+        valor ya se recuperó: estado "resuelta", ver sección 11)
        -> notificarAlerta -> colección "mail" -> extensión Trigger Email -> correo
        -> banner en la aplicación ("Ver alerta") -> listado /alertas -> detalle /alertas/:id
   -> panel general (/dashboard): tarjetas, estado general y resumen de incubadoras
@@ -23,7 +25,7 @@ Desconexión: el Servicio de Integración marca el dispositivo "desconectado"
 > Ningún caso de este documento fue ejecutado. Todos requieren un proyecto de
 > Firebase real (o su emulador), el broker MQTT (HiveMQ Cloud) y el Servicio
 > de Integración en ejecución. Las columnas `Resultado` y `Evidencia` de la
-> sección 11 están vacías a propósito: se completan al ejecutar las pruebas.
+> sección 12 están vacías a propósito: se completan al ejecutar las pruebas.
 
 ## 0. Prerrequisitos
 
@@ -32,6 +34,13 @@ Desconexión: el Servicio de Integración marca el dispositivo "desconectado"
 - El panel general, las páginas de alertas y la página de límites del Sprint 3
   (ramas `feat/sprint-3-umbrales`, `feat/sprint-3-alertas-paginas` y
   `feat/sprint-3-dashboard-acabado`, o `main` una vez integradas).
+- Para la sección 11 (y los casos 2.6, 2.7, 3.3, 9.5 y 9.7): la resolución
+  automática de alertas en `evaluarUmbrales` (rama
+  `feat/sprint-3-resolucion-alertas`) y el ciclo de vida de alertas en la
+  interfaz, es decir, el estado general que cuenta alertas `activa` y
+  `reconocida` y el bloque de resolución del detalle (rama
+  `feat/sprint-3-alertas-ciclo-de-vida-ui`), o `main` una vez integradas. Sin
+  el primer cambio ninguna alerta pasa a `resuelta`.
 - Para la sección 9: el Servicio de Integración con detección de desconexión
   (`iot-integration-service/lib/estado-conexion.js`, rama
   `feat/sprint-3-deteccion-desconexion`; al redactar este plan todavía no
@@ -42,7 +51,7 @@ Desconexión: el Servicio de Integración marca el dispositivo "desconectado"
 
 | Elemento | Qué debe estar listo |
 | -------- | -------------------- |
-| Cloud Functions | Desplegadas `procesarMedicion` (HTTPS), `notificarAlerta` (trigger `onCreate` de `alertas/{alertaId}`), `gestionarUsuario`, `gestionarIncubadora` y `crearDispositivo`. |
+| Cloud Functions | Desplegadas `procesarMedicion` (HTTPS, con la resolución automática de alertas de `evaluarUmbrales`), `notificarAlerta` (trigger `onCreate` de `alertas/{alertaId}`), `gestionarUsuario`, `gestionarIncubadora` y `crearDispositivo`. |
 | `INTEGRATION_SERVICE_TOKEN` | Configurado en las Cloud Functions; `procesarMedicion` responde `403` si el token no coincide. Debe ser el mismo valor que `PROCESAR_MEDICION_TOKEN` del Servicio de Integración. |
 | Reglas | `firestore.rules` desplegadas: `umbrales` (lectura autenticada, escritura solo administrador) y `alertas` (actualización solo administrador u operador, únicamente el campo `estado`, únicamente hacia `reconocida` o `resuelta`). |
 | Índices | `firestore.indexes.json` desplegado. Las consultas de monitoreo (`mediciones`, `alertas`, `umbrales`, `dispositivos`) no necesitan índices compuestos; el único índice declarado es el de `ordenes_ventilador`. |
@@ -129,6 +138,35 @@ los límites (hasta unos 8 segundos). Cuando se prueba un tipo, conviene dejar
 los otros límites en el rango amplio de la primera fila para no mezclar
 alertas.
 
+### 0.7 Cómo forzar la resolución automática
+
+`evaluarUmbrales` revisa, con cada medición, las alertas abiertas (`activa` o
+`reconocida`) de esa incubadora y variable. Para evitar que un valor que
+oscila sobre el límite abra y cierre alertas (y envíe un correo) en cada
+medición, usa una banda de histéresis: el valor debe volver al interior del
+rango por un margen.
+
+- `margen = (maximo − minimo) × 0,05` (5 % del rango).
+- Una alerta `*_alta` se resuelve cuando `valor ≤ maximo − margen`.
+- Una alerta `*_baja` se resuelve cuando `valor ≥ minimo + margen`.
+- Entre el límite y el límite menos (o más) el margen, la alerta sigue abierta
+  y no se crea ninguna nueva.
+- Guardar nuevos límites **no** modifica las alertas existentes: la
+  resolución (o no) ocurre al procesar la **siguiente** medición.
+
+| Objetivo | Límites a guardar con la alerta abierta | Por qué |
+| -------- | ---------------------------------------- | ------- |
+| Resolver una alerta de temperatura (alta o baja) | Temperatura 34–41 °C (primera fila de 0.6) | Margen 0,35: una `alta` se resuelve con `valor ≤ 40,65` y una `baja` con `valor ≥ 34,35`; el simulador se mantiene entre 35 y 40 °C. |
+| Resolver una alerta de humedad (alta o baja) | Humedad 35–75 % (primera fila de 0.6) | Margen 2: una `alta` se resuelve con `valor ≤ 73` y una `baja` con `valor ≥ 37`; el simulador se mantiene entre 40 y 70 %. |
+| Dejar el valor dentro de la banda de una alerta `alta` (no se resuelve) | Tomar el último `valor` V de `mediciones` y guardar `minimo` ≈ V − 25 y `maximo` ≈ V + 0,3 (ejemplo: V = 37,4 → temperatura 12–37,7) | Con el ejemplo (12–37,7): rango 25,7 y margen ≈ 1,3. La banda sin resolver es `(maximo − margen, maximo]`, es decir (36,4; 37,7], que contiene a V = 37,4. |
+| Dejar el valor dentro de la banda de una alerta `baja` (no se resuelve) | Con una alerta `temperatura_baja` abierta (límites 39–41), tomar el último `valor` V y guardar `minimo` ≈ V − 0,3 y `maximo` ≈ V + 25 (ejemplo: V = 37,4 → temperatura 37,1–62) | Con el ejemplo (37,1–62): rango 24,9 y margen ≈ 1,2. La alerta `baja` se resuelve solo con `valor ≥ minimo + margen` (≈ 38,3), y V = 37,4 queda en la banda sin resolver [37,1; 38,3), por lo que no se resuelve. Como V está por encima de `minimo`, tampoco se crea una alerta nueva. |
+
+El simulador no permite fijar un valor puntual (la temperatura varía hasta
+±0,15 °C y la humedad hasta ±1,5 % por medición). En los casos de banda (11.4
+y 11.5), comprobar en el documento de `mediciones` evaluado que su `valor`
+realmente quedó dentro de la banda; si no, repetir el caso con el último
+valor.
+
 ## 1. Medición dentro del rango
 
 | Caso | Pasos | Resultado esperado |
@@ -153,8 +191,8 @@ una prueba anterior, ver el caso 3.3).
 | 2.3 | Ídem con los límites de `humedad_alta`. | Alerta con `variable: "humedad"`, `tipo: "humedad_alta"`, `limite: 50`, `titulo` "Humedad fuera de rango". |
 | 2.4 | Ídem con los límites de `humedad_baja`. | Alerta con `tipo: "humedad_baja"` y `limite: 60`. |
 | 2.5 | Con la alerta de 2.1 creada, mirar la tarjeta "Temperatura" del panel. | La tarjeta se resalta (borde y fondo rojos) y muestra "Temperatura fuera del umbral". La tarjeta "Humedad" sigue normal si sus límites son amplios. Con la de 2.3, la tarjeta "Humedad" muestra "Humedad fuera del umbral". |
-| 2.6 | Mirar "Estado general" y el resumen del panel. | "Estado general" pasa a "Advertencia" (hay una alerta activa y ningún dispositivo desconectado) y el resumen cuenta la incubadora como "Advertencia". |
-| 2.7 | Volver a guardar límites amplios (0.6, primera fila) con la alerta aún `activa`. | Las tarjetas dejan de resaltarse en la siguiente medición (el resaltado depende de los límites, no del estado de la alerta). "Estado general" sigue en "Advertencia" mientras la alerta esté `activa`. |
+| 2.6 | Mirar "Estado general" y el resumen del panel. | "Estado general" pasa a "Advertencia" (hay una alerta abierta y ningún dispositivo desconectado) y el resumen cuenta la incubadora como "Advertencia". |
+| 2.7 | Volver a guardar límites amplios (0.6, primera fila) con la alerta aún `activa`. | Las tarjetas dejan de resaltarse en cuanto se guardan los límites (el resaltado depende de los límites, no del estado de la alerta). La alerta sigue `activa` hasta que llega la siguiente medición; entonces `evaluarUmbrales` la resuelve (sección 11) y "Estado general" vuelve a "Normal". |
 
 ## 3. Sin alertas duplicadas
 
@@ -162,7 +200,7 @@ una prueba anterior, ver el caso 3.3).
 | ---- | ----- | -------------------- |
 | 3.1 | Con los límites de `temperatura_alta` guardados y una alerta `activa` ya creada, dejar el simulador publicando durante al menos 5 mediciones más. | La colección `alertas` no recibe otra alerta de `temperatura_alta` para la misma incubadora: sigue habiendo una sola. |
 | 3.2 | Marcar esa alerta como `reconocida` (sección 7) y esperar más mediciones fuera de rango. | Tampoco se crea una alerta nueva: una alerta `reconocida` cuenta como abierta. |
-| 3.3 | En la consola de Firestore, cambiar manualmente `estado` de esa alerta a `resuelta` (la aplicación no ofrece ese botón) y esperar la siguiente medición fuera de rango. | Se crea una alerta nueva `activa` del mismo tipo (una alerta `resuelta` ya no cuenta como abierta). |
+| 3.3 | Guardar límites amplios (0.6, primera fila) y esperar una medición: la alerta pasa a `resuelta` automáticamente (sección 11). Volver a guardar los límites de `temperatura_alta` y esperar la siguiente medición. | Se crea una alerta nueva `activa` del mismo tipo, con otro id; la anterior queda `resuelta` (una alerta `resuelta` ya no cuenta como abierta). |
 | 3.4 | Con una alerta `temperatura_alta` abierta, provocar una de `humedad_alta`. | Se crea la alerta de humedad: la deduplicación es por incubadora + variable + tipo, no global. |
 
 ## 4. Correo por la extensión Trigger Email
@@ -189,7 +227,7 @@ una prueba anterior, ver el caso 3.3).
 
 | Caso | Pasos | Resultado esperado |
 | ---- | ----- | -------------------- |
-| 6.1 | Con alertas en los tres estados (usar 2.x, la sección 7 y, para `resuelta`, el cambio manual de 3.3), abrir `/alertas`. | Se muestran las alertas de **todas** las incubadoras, de la más reciente a la más antigua, con ícono por tipo, título, mensaje, estado y fecha. Los botones de filtro muestran contadores: "Todas (n)", "Activas (n)", "Reconocidas (n)" y "Resueltas (n)". |
+| 6.1 | Con alertas en los tres estados (usar 2.x, la sección 7 y, para `resuelta`, la resolución automática de 3.3 o de la sección 11), abrir `/alertas`. | Se muestran las alertas de **todas** las incubadoras, de la más reciente a la más antigua, con ícono por tipo, título, mensaje, estado y fecha. Los botones de filtro muestran contadores: "Todas (n)", "Activas (n)", "Reconocidas (n)" y "Resueltas (n)". |
 | 6.2 | Pulsar cada filtro: "Activas", "Reconocidas", "Resueltas" y "Todas". | La lista muestra solo las alertas de ese estado; el filtro seleccionado queda resaltado. |
 | 6.3 | Elegir un filtro sin alertas. | Aparece "No hay alertas" con el texto "No hay alertas activas." (o reconocidas / resueltas, según el filtro). |
 | 6.4 | Con `/alertas` abierto, provocar una alerta nueva. | La alerta aparece en la lista sin recargar y los contadores se actualizan. |
@@ -250,9 +288,9 @@ mediciones. El Servicio de Integración tiene que seguir corriendo.
 | 9.2 | Detener el simulador (Ctrl+C) y anotar la hora. Esperar más de 30 segundos (la revisión corre cada 5 s por defecto, así que puede tardar hasta unos 35–40 s). | En el log del Servicio de Integración aparece `Dispositivo "<id>" desconectado (sin señales hace más de 30 s).` para el sensor y para el ventilador simulados. |
 | 9.3 | En Firestore, revisar `dispositivos/<id>` de ambos. | `estadoConexion` pasó a `"desconectado"`. |
 | 9.4 | Mirar el panel general sin recargar. | La tarjeta "Estado de conexión" pasa a "Desconectado" (con la hora relativa de la última comunicación); la tarjeta "Ventiladores" indica "1 sin conexión."; "Estado general" pasa a "Crítico"; el resumen cuenta la incubadora como "Crítico". |
-| 9.5 | Con la incubadora desconectada **y** una alerta activa a la vez. | "Estado general" sigue en "Crítico": un dispositivo desconectado tiene prioridad sobre la alerta activa. |
-| 9.6 | Con dos incubadoras (0.3, punto 4), cada una con su propio simulador (ids propios en las variables `SIMULADOR_*`), detener solo el simulador de una de ellas. | El resumen cuenta una incubadora en "Crítico" y la otra en "Normal" (o "Advertencia" si tiene una alerta activa); el total de incubadoras no cambia. |
-| 9.7 | Volver a iniciar el simulador. | En el siguiente latido o medición el servicio marca el dispositivo de nuevo como `conectado` (log `Dispositivo "<id>" conectado (...)`). El panel vuelve a "Conectado" y "Estado general" a "Normal" (o "Advertencia" si hay una alerta activa), sin recargar. |
+| 9.5 | Con la incubadora desconectada **y** una alerta abierta (`activa` o `reconocida`) a la vez. | "Estado general" sigue en "Crítico": un dispositivo desconectado tiene prioridad sobre la alerta abierta (sea `activa` o `reconocida`). |
+| 9.6 | Con dos incubadoras (0.3, punto 4), cada una con su propio simulador (ids propios en las variables `SIMULADOR_*`), detener solo el simulador de una de ellas. | El resumen cuenta una incubadora en "Crítico" y la otra en "Normal" (o "Advertencia" si tiene una alerta abierta); el total de incubadoras no cambia. |
+| 9.7 | Volver a iniciar el simulador. | En el siguiente latido o medición el servicio marca el dispositivo de nuevo como `conectado` (log `Dispositivo "<id>" conectado (...)`). El panel vuelve a "Conectado" y "Estado general" a "Normal" (o "Advertencia" si hay una alerta abierta), sin recargar. |
 | 9.8 | Reiniciar el Servicio de Integración con el simulador detenido, partiendo de un dispositivo que había quedado `conectado` en Firestore. | El servicio lo recupera al arrancar y le da un margen de 30 segundos desde el arranque; si no recibe señales en ese lapso lo marca `desconectado`. |
 | 9.9 | Con el Servicio de Integración detenido y el simulador apagado, esperar más de 30 segundos. | Nadie marca los dispositivos como desconectados: siguen `conectado` en Firestore. Es una limitación conocida (la detección corre dentro del servicio). |
 | 9.10 | Revisar la colección `alertas` después de 9.2. | No se crea ninguna alerta por la desconexión: en esta versión la desconexión solo cambia `estadoConexion` (el tipo `dispositivo_desconectado` existe en `ALERT_TYPES`, pero no se genera automáticamente). |
@@ -266,7 +304,30 @@ mediciones. El Servicio de Integración tiene que seguir corriendo.
 | 10.3 | Desactivar una incubadora (estado "Inactiva"). | Deja de aparecer en el selector y en el resumen del panel. |
 | 10.4 | Cambiar el selector "Incubadora" del panel. | Las tarjetas (mediciones, límites, conexión, ventiladores y "Estado general") corresponden a la incubadora elegida; el resumen sigue mostrando todas. |
 
-## 11. Registro de resultados
+## 11. Resolución automática de alertas
+
+La resolución la hace `evaluarUmbrales` con cada medición, aplicando la banda
+de histéresis de 5 % descrita en 0.7. Ninguna pantalla ofrece un botón para
+resolver una alerta. En todos los casos, antes de empezar, dejar la colección
+`alertas` sin alertas abiertas de esa incubadora y variable.
+
+| Caso | Pasos | Resultado esperado |
+| ---- | ----- | -------------------- |
+| 11.1 | Provocar una alerta `temperatura_alta` (2.1) y dejarla `activa`. Guardar límites amplios (temperatura 34–41 °C, 0.7) y esperar la siguiente medición. | El documento de la alerta pasa a `estado: "resuelta"` y recibe `resueltaEn` (timestamp), `resueltaPor: "sistema"` y `valorResolucion` (el `valor` de esa medición, ≤ 40,65). Los demás campos no cambian. No se crea una alerta nueva ni un documento en `mail` (`notificarAlerta` solo actúa al crear alertas). |
+| 11.2 | Ídem 11.1, pero marcando antes la alerta como `reconocida` (sección 7). | También pasa a `resuelta` con los mismos campos: una alerta `reconocida` se resuelve igual que una `activa`. |
+| 11.3 | Provocar una alerta `temperatura_baja` (2.2). Guardar límites amplios (temperatura 34–41 °C) y esperar la siguiente medición. | La alerta `baja` pasa a `resuelta` (`valor ≥ 34,35`) con `resueltaEn`, `resueltaPor: "sistema"` y `valorResolucion`. |
+| 11.4 | Provocar una alerta `temperatura_alta` y, con ella abierta, guardar los límites de la fila "banda de una alerta `alta`" de 0.7 (ejemplo: temperatura 12–37,7 para V = 37,4). Esperar la siguiente medición y comprobar que su `valor` quedó entre `maximo − margen` y `maximo`. | La alerta sigue abierta (`activa` o `reconocida`, según estuviera), sin `resueltaEn`, `resueltaPor` ni `valorResolucion`. No se escribe nada en `alertas` ni en `mail`. |
+| 11.5 | Provocar una alerta `temperatura_baja` y, con ella abierta, guardar los límites de la fila "banda de una alerta `baja`" de 0.7 (ejemplo: temperatura 37,1–62 para V = 37,4). Esperar la siguiente medición y comprobar que su `valor` quedó entre `minimo` y `minimo + margen`. | La alerta `baja` sigue abierta, sin campos de resolución, y no se crea ninguna alerta nueva. |
+| 11.6 | Después de 11.1 (alerta `resuelta`), volver a guardar los límites de `temperatura_alta` (0.6) y esperar la siguiente medición. | Se crea una alerta nueva `activa` con otro id; la anterior sigue `resuelta`. Se generan de nuevo los documentos en `mail` por administrador (4.1) y el banner vuelve a aparecer (5.1). |
+| 11.7 | Con una alerta `temperatura_alta` abierta (límites 30–36), guardar los límites de `temperatura_baja` (39–41) y esperar la siguiente medición. | En esa misma medición la alerta `temperatura_alta` pasa a `resuelta` (el valor está por debajo de `maximo − margen`) y se crea una alerta `temperatura_baja` `activa`. |
+| 11.8 | Con una alerta `temperatura_alta` y una `humedad_alta` abiertas a la vez (3.4), guardar solo los límites amplios de temperatura (0.7) y esperar la siguiente medición. | Solo la alerta de temperatura pasa a `resuelta`: la resolución es por incubadora y variable, y la de humedad sigue abierta. |
+| 11.9 | Con el panel general abierto sin recargar: provocar una alerta `temperatura_alta`; luego reconocerla (sección 7); luego guardar límites amplios y esperar la siguiente medición. | Con la alerta `activa`, "Estado general" y el resumen muestran "Advertencia". Tras reconocerla, siguen en "Advertencia" (la alerta está abierta mientras el valor siga fuera de rango). Solo después de la resolución automática vuelven a "Normal". |
+| 11.10 | Abrir `/alertas/<id>` de una alerta resuelta automáticamente (11.1). | El estado muestra "Resuelta" y debajo de la lista de datos aparece un bloque con el texto "Resuelta automáticamente", la fecha y hora de `resueltaEn` y la línea "La medición volvió a <valorResolucion> °C" (o "%" para humedad). No aparece el botón "Marcar como reconocida". |
+| 11.11 | Abrir el detalle de una alerta `activa` y el de una `reconocida`. | No aparece el bloque de resolución. |
+| 11.12 | En la consola de Firestore, cambiar a mano `estado` de una alerta a `resuelta` (sin `resueltaPor`, `resueltaEn` ni `valorResolucion`) y abrir su detalle. | El bloque muestra solo "Resuelta" (sin "automáticamente"), la fecha como "-" y no muestra la línea "La medición volvió a ...". No hay errores en la consola del navegador. |
+| 11.13 | Abrir `/alertas` después de 11.1 y 11.3. | Las alertas resueltas aparecen bajo el filtro "Resueltas" y ya no bajo "Activas" ni "Reconocidas"; los contadores se actualizan solos. |
+
+## 12. Registro de resultados
 
 Completar al ejecutar el plan. `Resultado`: Aprobado / Fallido / Bloqueado.
 `Evidencia`: captura de pantalla, extracto de log o enlace al documento de
@@ -336,7 +397,7 @@ Firestore.
 | 9.2 | Log de desconexión tras más de 30 s | | |
 | 9.3 | `estadoConexion` pasa a `desconectado` | | |
 | 9.4 | Panel: conexión, ventiladores, "Crítico" y resumen | | |
-| 9.5 | Prioridad de "Crítico" sobre la alerta activa | | |
+| 9.5 | Prioridad de "Crítico" sobre la alerta abierta | | |
 | 9.6 | Resumen con una incubadora desconectada | | |
 | 9.7 | Reconexión restaura el estado | | |
 | 9.8 | Recuperación al reiniciar el servicio | | |
@@ -346,6 +407,19 @@ Firestore.
 | 10.2 | Alerta en una sola incubadora | | |
 | 10.3 | Incubadora inactiva fuera del resumen | | |
 | 10.4 | Selector de incubadora del panel | | |
+| 11.1 | Alerta `activa` se resuelve sola (campos de resolución, sin correo) | | |
+| 11.2 | Alerta `reconocida` se resuelve sola | | |
+| 11.3 | Alerta `baja` se resuelve sola | | |
+| 11.4 | Banda de histéresis: la alerta `alta` no se resuelve | | |
+| 11.5 | Banda de histéresis: la alerta `baja` no se resuelve | | |
+| 11.6 | Tras resolverse, la condición crea una alerta nueva con correo y banner | | |
+| 11.7 | Salto de extremo a extremo: se resuelve una y se crea la otra | | |
+| 11.8 | La resolución es por variable | | |
+| 11.9 | "Estado general" sigue en "Advertencia" tras reconocer y vuelve a "Normal" al resolverse | | |
+| 11.10 | Detalle de una alerta resuelta automáticamente | | |
+| 11.11 | Detalle sin bloque de resolución en alertas abiertas | | |
+| 11.12 | Detalle de una alerta resuelta a mano (sin campos de resolución) | | |
+| 11.13 | Listado: alertas resueltas bajo el filtro "Resueltas" | | |
 
 ## Notas
 
@@ -364,12 +438,19 @@ Firestore.
   tienes permisos para ..."); este plan no incluye un caso manual para
   provocarlos desde la interfaz porque, sin red, Firestore deja la escritura
   en cola en lugar de rechazarla.
-- La aplicación no ofrece un botón para pasar una alerta a `resuelta`
-  (las reglas lo admiten, pero la interfaz solo permite "Marcar como
-  reconocida"): el cambio manual en la consola de Firestore de los casos 3.3
-  y 6.1 es solo una herramienta de prueba.
-- El resumen y el "Estado general" del panel consideran las últimas 200
-  alertas leídas: una alerta `activa` más antigua que las 200 más recientes
-  (de cualquier estado) no se cuenta. No afecta a las pruebas de este plan.
-- Una vez ejecutado el plan, completar la sección 11 y, si algún caso falla,
+- La aplicación no ofrece un botón para pasar una alerta a `resuelta`: la
+  interfaz solo permite "Marcar como reconocida" y la resolución la hace
+  automáticamente `evaluarUmbrales` con cada medición (sección 11). Las
+  reglas de Firestore sí admiten que un administrador u operador escriba
+  `estado: "resuelta"` desde un cliente (caso 7.7, inciso c); el cambio manual
+  en la consola del caso 11.12 sirve solo para probar el detalle con una
+  alerta sin campos de resolución.
+- La resolución solo ocurre al procesar una medición nueva de esa incubadora y
+  variable: si el dispositivo deja de enviar mediciones (por ejemplo, está
+  desconectado), una alerta abierta no se resuelve aunque se amplíen los
+  límites.
+- El resumen y el "Estado general" del panel consideran como máximo las 200
+  alertas abiertas (`activa` o `reconocida`) más recientes: una alerta abierta
+  más antigua que esas 200 no se cuenta. No afecta a las pruebas de este plan.
+- Una vez ejecutado el plan, completar la sección 12 y, si algún caso falla,
   abrir una incidencia con el identificador del caso y la evidencia.

@@ -116,6 +116,32 @@
   text-align: right;
 }
 
+.alerta-detalle__resolucion {
+  margin-top: var(--spacing-5);
+  padding: var(--spacing-3) var(--spacing-4);
+
+  background-color: var(--color-success-light);
+
+  border-radius: var(--radius-md);
+}
+
+.alerta-detalle__resolucion-titulo {
+  margin: 0 0 var(--spacing-2);
+
+  color: var(--color-success-dark);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.alerta-detalle__resolucion-texto {
+  margin: 0;
+
+  color: var(--color-text-primary);
+
+  font-size: var(--font-size-sm);
+}
+
 .alerta-detalle .message {
   margin-top: var(--spacing-5);
 }
