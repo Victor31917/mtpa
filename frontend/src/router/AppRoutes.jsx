@@ -33,8 +33,9 @@ import { ROLES, ROUTES } from "../utils/constants";
 // - Rutas protegidas: exigen sesión activa (ProtectedRoute).
 // - "/usuarios", la gestión de incubadoras, "/configuracion/limites" y
 //   "/ventiladores/automatizacion" además exigen rol "administrador"
-//   (RoleRoute). El panel "/ventiladores" lo ve cualquier usuario con
-//   sesión: quién puede enviar comandos lo decide la propia pantalla.
+//   (RoleRoute).
+// - "/ventiladores" exige rol "administrador" u "operador" (RoleRoute): el
+//   usuario de consulta no accede al control de ventiladores.
 //
 // Nota: Dashboard.jsx, DashboardLayout.jsx, NotFound.jsx y
 // Unauthorized.jsx se agregan aquí como placeholders mínimos
@@ -63,7 +64,11 @@ const AppRoutes = () => {
           <Route path={ROUTES.ALERTS} element={<Alertas />} />
           <Route path={ROUTES.ALERT_DETAIL} element={<AlertaDetalle />} />
 
-          <Route path={ROUTES.FANS} element={<ControlVentiladores />} />
+          <Route
+            element={<RoleRoute roles={[ROLES.ADMIN, ROLES.OPERATOR]} />}
+          >
+            <Route path={ROUTES.FANS} element={<ControlVentiladores />} />
+          </Route>
 
           <Route element={<RoleRoute roles={[ROLES.ADMIN]} />}>
             <Route path={ROUTES.USERS} element={<Usuarios />} />
