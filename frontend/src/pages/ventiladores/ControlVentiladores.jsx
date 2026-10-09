@@ -28,6 +28,17 @@ import "./ControlVentiladores.css";
 // tiempo la orden se muestra como atascada y se vuelve a permitir enviar.
 const ORDEN_EN_CURSO_MAX_MS = 120 * 1000;
 
+// La edad de una orden mezcla el reloj del cliente con el "creadaEn" que pone
+// el servidor, así que un desfase entre ambos la falsea. Por eso una orden
+// también se considera atascada si este cliente la vio SIN CAMBIOS durante
+// ORDEN_EN_CURSO_MAX_MS (solo usa el reloj del cliente), y la edad por sí sola
+// solo cuenta si supera el máximo más esta tolerancia (un cliente adelantado
+// hasta 5 min no marca como atascada una orden recién creada). Limitación: con
+// un reloj atrasado la edad no llega nunca al umbral y la orden se marca recién
+// tras ver pasar el tiempo; con un reloj adelantado más que la tolerancia, una
+// orden recién creada se vería atascada.
+const TOLERANCIA_RELOJ_MS = 5 * 60 * 1000;
+
 // Órdenes más recientes que se leen por ventilador (solo hace falta la
 // última; unas pocas más permiten reconocer la que se acaba de crear).
 const ORDENES_LEIDAS = 5;
@@ -62,13 +73,13 @@ const ESTADOS_ORDEN = {
   [COMMAND_STATUS.FAILED]: {
     etiqueta: "Fallida",
     variante: "danger",
-    descripcion: "La orden no pudo completarse. Inténtelo nuevamente.",
+    descripcion: "La orden no pudo completarse. Inténtalo nuevamente.",
   },
   [COMMAND_STATUS.EXPIRED]: {
     etiqueta: "Expirada",
     variante: "warning",
     descripcion:
-      "La orden no se envió a tiempo y se descartó. Inténtelo nuevamente.",
+      "La orden no se envió a tiempo y se descartó. Inténtalo nuevamente.",
   },
 };
 
@@ -107,18 +118,42 @@ const ETIQUETAS_ACCION = {
 const obtenerEstadoOrden = (estado) =>
   ESTADOS_ORDEN[estado] ?? ESTADO_ORDEN_DESCONOCIDO;
 
-// Milisegundos desde que se creó la orden. Sin "creadaEn" (por ejemplo, el
-// server timestamp todavía pendiente) se la considera recién creada.
+// Milisegundos desde que se creó la orden (nunca negativos). Sin "creadaEn"
+// (por ejemplo, el server timestamp todavía pendiente) se la considera recién
+// creada.
 const edadDeOrden = (orden, ahora) => {
   const creada = toDate(orden?.creadaEn);
 
-  return creada ? ahora - creada.getTime() : 0;
+  return creada ? Math.max(0, ahora - creada.getTime()) : 0;
 };
 
+// Registro de desde cuándo ve este cliente la última orden en su estado actual
+// ({ ordenId, estado, desde }). Se conserva mientras no cambie la orden ni su
+// estado.
+const actualizarVista = (previa, ultima, ahora) => {
+  if (!ultima) {
+    return null;
+  }
+
+  if (previa && previa.ordenId === ultima.id && previa.estado === ultima.estado) {
+    return previa;
+  }
+
+  return { ordenId: ultima.id, estado: ultima.estado, desde: ahora };
+};
+
+// Milisegundos que este cliente lleva viendo la orden sin cambios.
+const tiempoVisto = (orden, vista, ahora) =>
+  vista && orden && vista.ordenId === orden.id && vista.estado === orden.estado
+    ? Math.max(0, ahora - vista.desde)
+    : 0;
+
 // Orden en curso que superó el tiempo máximo sin terminar.
-const estaAtascada = (orden, ahora) =>
+const estaAtascada = (orden, ahora, vista) =>
   ESTADOS_ORDEN_EN_CURSO.includes(orden?.estado) &&
-  edadDeOrden(orden, ahora) >= ORDEN_EN_CURSO_MAX_MS;
+  (tiempoVisto(orden, vista, ahora) >= ORDEN_EN_CURSO_MAX_MS ||
+    edadDeOrden(orden, ahora) >=
+      ORDEN_EN_CURSO_MAX_MS + TOLERANCIA_RELOJ_MS);
 
 // "estadoActual" es null hasta que el dispositivo confirma un estado: se
 // muestra como "Desconocido", nunca como "Apagado".
@@ -134,34 +169,39 @@ const obtenerEstadoVentilador = (estadoActual) => {
   return { etiqueta: "Desconocido", clase: "desconocido" };
 };
 
+// La orden recién creada por esta pantalla ("ordenEsperada") todavía no llegó
+// por la suscripción y no pasó el tiempo máximo de espera.
+const estaEsperandoOrden = (ordenEsperada, ordenes, ahora) =>
+  Boolean(ordenEsperada) &&
+  !ordenes.some((orden) => orden.id === ordenEsperada.id) &&
+  ahora - ordenEsperada.desde < ORDEN_EN_CURSO_MAX_MS;
+
+// La última orden aún no terminó y todavía no pasó el tiempo máximo.
+const hayOrdenVigente = (ultima, vista, ahora) =>
+  ESTADOS_ORDEN_EN_CURSO.includes(ultima?.estado) &&
+  !estaAtascada(ultima, ahora, vista);
+
 // Indica si hay un comando en curso desde esta pantalla, para evitar el doble
-// envío: la llamada a la callable sigue en vuelo, la orden recién creada
-// ("ordenEsperada") todavía no llegó por la suscripción, o la última orden aún
-// no terminó y es reciente.
+// envío: la llamada a la callable sigue en vuelo, se espera la orden recién
+// creada, o la última orden aún no terminó y no está atascada.
 const hayOrdenEnCurso = ({
   accionEnCurso,
   ordenEsperada,
   ordenes,
   ultima,
+  vista,
   ahora,
-}) => {
-  if (accionEnCurso !== "") {
-    return true;
-  }
+}) =>
+  accionEnCurso !== "" ||
+  estaEsperandoOrden(ordenEsperada, ordenes, ahora) ||
+  hayOrdenVigente(ultima, vista, ahora);
 
-  if (
-    ordenEsperada &&
-    !ordenes.some((orden) => orden.id === ordenEsperada.id) &&
-    ahora - ordenEsperada.desde < ORDEN_EN_CURSO_MAX_MS
-  ) {
-    return true;
-  }
-
-  return (
-    ESTADOS_ORDEN_EN_CURSO.includes(ultima?.estado) &&
-    !estaAtascada(ultima, ahora)
-  );
-};
+// Indica si hay algo que todavía puede vencer con el paso del tiempo, es decir
+// si hace falta el reloj. Cuando no queda nada por vencer el intervalo se
+// apaga. (La llamada en vuelo no cuenta: termina sola.)
+const hayAlgoPorVencer = ({ ordenEsperada, ordenes, ultima, vista, ahora }) =>
+  estaEsperandoOrden(ordenEsperada, ordenes, ahora) ||
+  hayOrdenVigente(ultima, vista, ahora);
 
 // Decide si los botones de encender/apagar están habilitados y, si no, por
 // qué. Los comandos manuales solo se admiten en modo manual o mixto (igual
@@ -177,7 +217,7 @@ const evaluarControl = ({
   if (!puedeControlar) {
     return {
       habilitado: false,
-      motivo: "Su rol no permite enviar comandos a los ventiladores.",
+      motivo: "No tienes permisos para enviar comandos a los ventiladores.",
     };
   }
 
@@ -252,7 +292,7 @@ const mensajeDeErrorAlEnviar = (err) => {
   return "No fue posible enviar el comando. Inténtalo nuevamente.";
 };
 
-const UltimaOrden = ({ cargando, error, orden, ahora }) => {
+const UltimaOrden = ({ cargando, error, orden, vista, ahora }) => {
   if (cargando) {
     return <p className="ventiladores-orden__texto">{MESSAGES.LOADING}</p>;
   }
@@ -271,7 +311,7 @@ const UltimaOrden = ({ cargando, error, orden, ahora }) => {
     );
   }
 
-  const atascada = estaAtascada(orden, ahora);
+  const atascada = estaAtascada(orden, ahora, vista);
   const estado = atascada
     ? ESTADO_ORDEN_ATASCADA
     : obtenerEstadoOrden(orden.estado);
@@ -286,9 +326,11 @@ const UltimaOrden = ({ cargando, error, orden, ahora }) => {
 
       {aparte ? (
         // El detalle técnico de la orden (si lo hay) queda solo en el title.
+        // Es "status" y no "alert": puede ser una falla histórica que se
+        // muestra al abrir la pantalla, no algo que acaba de ocurrir.
         <div
           className={`message message--${estado.variante} ventiladores-orden__falla`}
-          role="alert"
+          role="status"
           title={orden.error || undefined}
         >
           <div>
@@ -329,8 +371,13 @@ const TarjetaVentilador = ({
   const [errorAccion, setErrorAccion] = useState("");
 
   // Orden recién creada por esta pantalla ({ id, desde }) hasta que aparezca
-  // en la suscripción.
+  // en la suscripción o venza la espera. Si la orden llegó antes que la
+  // respuesta de la callable puede quedar un valor viejo: es inofensivo porque
+  // estaEsperandoOrden lo descarta al evaluarlo.
   const [ordenEsperada, setOrdenEsperada] = useState(null);
+
+  // Desde cuándo ve este cliente la última orden en su estado actual.
+  const [vista, setVista] = useState(null);
 
   // Reloj para decidir cuándo una orden en curso pasa a atascada.
   const [ahora, setAhora] = useState(() => Date.now());
@@ -339,8 +386,16 @@ const TarjetaVentilador = ({
     const unsubscribe = ordenesRepository.suscribirseAOrdenesPorVentilador(
       id,
       (lista) => {
-        setAhora(Date.now());
+        const instante = Date.now();
+
+        setAhora(instante);
         setOrdenes({ id, lista, error: "" });
+        setVista((previa) => actualizarVista(previa, lista[0] ?? null, instante));
+        setOrdenEsperada((actual) =>
+          actual && lista.some((orden) => orden.id === actual.id)
+            ? null
+            : actual
+        );
       },
       (err) => {
         console.error("Error al leer las órdenes del ventilador:", err);
@@ -360,18 +415,29 @@ const TarjetaVentilador = ({
   const lista = cargandoOrdenes ? [] : ordenes.lista;
   const ultima = lista[0] ?? null;
 
-  const necesitaReloj =
-    ordenEsperada !== null || ESTADOS_ORDEN_EN_CURSO.includes(ultima?.estado);
+  const necesitaReloj = hayAlgoPorVencer({
+    ordenEsperada,
+    ordenes: lista,
+    ultima,
+    vista,
+    ahora,
+  });
 
   useEffect(() => {
     if (!necesitaReloj) {
       return undefined;
     }
 
-    const intervalo = setInterval(
-      () => setAhora(Date.now()),
-      INTERVALO_RELOJ_MS
-    );
+    const intervalo = setInterval(() => {
+      const instante = Date.now();
+
+      setAhora(instante);
+      setOrdenEsperada((actual) =>
+        actual && instante - actual.desde >= ORDEN_EN_CURSO_MAX_MS
+          ? null
+          : actual
+      );
+    }, INTERVALO_RELOJ_MS);
 
     return () => clearInterval(intervalo);
   }, [necesitaReloj]);
@@ -386,6 +452,7 @@ const TarjetaVentilador = ({
       ordenEsperada,
       ordenes: lista,
       ultima,
+      vista,
       ahora,
     }),
   });
@@ -445,6 +512,7 @@ const TarjetaVentilador = ({
           cargando={cargandoOrdenes}
           error={cargandoOrdenes ? "" : ordenes.error}
           orden={ultima}
+          vista={vista}
           ahora={ahora}
         />
       </section>
@@ -591,8 +659,8 @@ const ControlVentiladores = () => {
         <div className="page__header-content">
           <h1 className="page__title">Control de ventiladores</h1>
           <p className="page__subtitle">
-            Consulte el estado de los ventiladores y, si su rol lo permite,
-            enciéndalos o apáguelos manualmente.
+            Consulte el estado de los ventiladores y enciéndalos o apáguelos
+            manualmente.
           </p>
         </div>
       </header>
