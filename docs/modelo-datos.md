@@ -311,8 +311,10 @@ manuales); en `mixto` acepta ambas.
 
 ## `ordenes_ventilador/{ordenId}` (Sprint 4)
 
-Cada orden es una solicitud de encender o apagar un ventilador. La crea la
-Cloud Function `enviarComandoVentilador` con estado `pendiente`; el Servicio
+Cada orden es una solicitud de encender o apagar un ventilador. La crean dos
+caminos, ambos con estado `pendiente`: la Cloud Function `enviarComandoVentilador`
+(órdenes manuales, pedidas por un usuario) y `evaluarAutomatizacion`, que corre
+dentro de `procesarMedicion` (órdenes automáticas, ver más abajo). El Servicio
 de Integración IoT la toma, publica el comando MQTT y actualiza su estado. El
 cliente solo puede leerlas (ver `firestore.rules`).
 
@@ -322,9 +324,9 @@ cliente solo puede leerlas (ver `firestore.rules`).
 | `incubadoraId`     | `string`    | Copiado de `ventiladores/{ventiladorId}`; el Servicio de Integración lo usa para el tópico MQTT. |
 | `dispositivoId`    | `string`    | Copiado de `ventiladores/{ventiladorId}`; el Servicio de Integración lo usa para el tópico MQTT. |
 | `accionSolicitada` | `string`    | `encender` o `apagar` (`FAN_ACTIONS.TURN_ON` / `FAN_ACTIONS.TURN_OFF`).         |
-| `origen`           | `string`    | Quién generó la orden. `manual` cuando la crea `enviarComandoVentilador`.       |
+| `origen`           | `string`    | Quién generó la orden: `manual` si la crea `enviarComandoVentilador`, `automatico` si la crea `evaluarAutomatizacion`. |
 | `estado`           | `string`    | Estado de la orden (ver tabla de abajo).                                        |
-| `solicitadoPor`    | `string`    | `uid` del usuario que envió el comando.                                         |
+| `solicitadoPor`    | `string`    | `uid` del usuario que envió el comando, o `"sistema"` en las órdenes automáticas. |
 | `creadaEn`         | `timestamp` | Fecha de creación (server timestamp). El Servicio de Integración descarta las órdenes pendientes demasiado antiguas. |
 | `enviadaEn`        | `timestamp` | Momento en que el comando se publicó en MQTT (lo escribe el Servicio de Integración). |
 | `actualizadaEn`    | `timestamp` | Último cambio de `estado` hecho por el Servicio de Integración.                 |
@@ -337,7 +339,7 @@ ampliado con `enviando` y `expirada`, que usa el Servicio de Integración:
 
 | Estado       | Significado                                                                  | Lo escribe |
 | ------------ | ------------------------------------------------------------------------------ | ---------- |
-| `pendiente`  | Orden creada, todavía no tomada por el Servicio de Integración.                | `enviarComandoVentilador` |
+| `pendiente`  | Orden creada, todavía no tomada por el Servicio de Integración.                | `enviarComandoVentilador` o `evaluarAutomatizacion` |
 | `enviando`   | El Servicio de Integración tomó la orden (transacción `pendiente` → `enviando`) y está publicando el comando; evita doble publicación. | Servicio de Integración |
 | `enviada`    | El comando se publicó en MQTT (`enviadaEn`).                                    | Servicio de Integración |
 | `ejecutada`  | El dispositivo confirmó el cambio por `.../estado`. Pendiente de implementar.   | Servicio de Integración (trabajo futuro) |
@@ -346,6 +348,60 @@ ampliado con `enviando` y `expirada`, que usa el Servicio de Integración:
 
 Flujo normal: `pendiente` → `enviando` → `enviada` → `ejecutada`; las
 alternativas finales son `fallida` y `expirada`.
+
+### Órdenes automáticas: `evaluarAutomatizacion`
+
+Función auxiliar (no es una Cloud Function) que `procesarMedicion` ejecuta
+después de guardar cada medición y de evaluar los umbrales. Aplica las reglas de
+`reglas_automatizacion` y crea órdenes `automatico`.
+
+- **Dónde corre y aislamiento.** Tiene su propio `try/catch`: si falla, se
+  registra el error y la medición ya guardada no se ve afectada. Dentro, cada
+  regla se evalúa por separado: el fallo de una (por ejemplo una escritura
+  rechazada) se registra y no frena a las demás. Puede haber más de una regla
+  activa para la misma incubadora y variable (distintos ventiladores).
+- **Qué reglas evalúa.** Una consulta por `incubadoraId` y `variable`; las
+  reglas con `activa` distinto de `true` se descartan en memoria. Se ignora el
+  ventilador sin documento o en modo `manual` (se evalúa en `automatico` y
+  `mixto`).
+- **Histéresis.** Con `valor >= umbralActivacion` el estado deseado es
+  `encendido`; con `valor <= umbralActivacion - margenHisteresis`, `apagado`;
+  entre ambos límites no se hace nada. Ambos bordes son inclusivos. El límite de
+  apagado se redondea a 6 decimales antes de comparar para absorber el error de
+  punto flotante (`0.3 - 0.1` da `0.19999999999999998`): un valor medido
+  exactamente en el límite cuenta como tal. Por eso el margen mínimo es 0,01.
+- **`estadoActual`.** Si ya es el estado deseado no se crea orden. Si es `null`
+  (desconocido, como nace) cuenta como distinto del deseado.
+- **Cooldown y ventana de deduplicación.** Se miran las últimas 10 órdenes del
+  ventilador (`ventiladorId` + `creadaEn` descendente, índice existente). Una
+  orden de la **misma acción** impide crear otra si se creó hace menos de **120 s**
+  (en cualquier estado, también `fallida`, `expirada` o `ejecutada`) o si sigue
+  en curso (`pendiente`, `enviando` o `enviada`) y se creó hace menos de
+  **300 s**. Así no se genera una orden por medición mientras `estadoActual`
+  no se actualiza, los reintentos tras un fallo quedan espaciados y una orden
+  varada deja de bloquear la acción pasados 5 minutos. Una `creadaEn` ausente o
+  que no es un timestamp se trata como reciente. Una orden de la acción
+  contraria nunca bloquea. Los 120 s superan lo que tarda una orden sana en
+  resolverse (el Servicio de Integración expira las `pendiente` a los 60 s;
+  otra tarea prevé además un timeout de confirmación de 30 s).
+- **Atomicidad.** La lectura de las órdenes recientes y la creación de la nueva
+  van en una transacción de Firestore: dos mediciones simultáneas no crean dos
+  órdenes iguales (la segunda se reintenta y ve la orden de la primera).
+- **Costo por medición.** Una consulta de reglas siempre. Solo si hay una regla
+  activa y el valor queda fuera de la banda se leen el documento del ventilador
+  y las 10 órdenes recientes, y solo si hace falta se escribe una orden.
+- **Límites conocidos.**
+  - Pueden coexistir órdenes de acciones contrarias (por ejemplo una `encender`
+    en curso y una `apagar` nueva); el ventilador recibirá ambas en orden.
+  - En modo `mixto` una orden manual puede ser revertida por la automática en la
+    siguiente medición fuera de banda, si ya pasó el cooldown.
+  - Una orden manual de la misma acción también cuenta para el cooldown y la
+    ventana (la deduplicación no distingue el `origen`).
+  - Mientras ninguna tarea actualice `estadoActual` (Sprint 4, tarea [10]),
+    la automatización pide a lo sumo una orden por acción cada 120 s si
+    terminan, o cada 300 s si quedan varadas.
+  - La atomicidad se apoya en que la consulta dentro de la transacción impide
+    inserciones concurrentes; no se probó contra Firestore real.
 
 ## Notas generales
 

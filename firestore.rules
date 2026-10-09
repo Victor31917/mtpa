@@ -186,9 +186,11 @@ service cloud.firestore {
     // =====================================================
     //
     // Los usuarios autenticados pueden consultar las órdenes.
-    // Se crean únicamente desde la Cloud Function
-    // "enviarComandoVentilador" y su estado lo actualiza el
-    // Servicio de Integración, ambos con Admin SDK.
+    // Se crean únicamente desde Cloud Functions: las manuales con
+    // "enviarComandoVentilador" y las automáticas con
+    // "evaluarAutomatizacion" (dentro de "procesarMedicion"). Su
+    // estado lo actualiza el Servicio de Integración. Todo con
+    // Admin SDK.
     //
 
     match /ordenes_ventilador/{id} {

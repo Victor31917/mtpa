@@ -793,10 +793,63 @@ const ORDENES_RECIENTES_DEDUPLICACION = 10;
 // terminó, así que no se pide otra igual.
 const ESTADOS_ORDEN_EN_CURSO = ["pendiente", "enviando", "enviada"];
 
+// Enfriamiento entre órdenes automáticas de la misma acción: una orden de
+// la misma acción creada hace menos que esto bloquea a la nueva, en
+// CUALQUIER estado (también "fallida", "expirada" o "ejecutada"). Evita
+// una orden por medición (cada ~8 s con el simulador) mientras el estado
+// del ventilador no se actualiza o el servicio no responde, y espacia los
+// reintentos tras un fallo. Se eligió mayor que lo que tarda una orden en
+// resolverse: el Servicio de Integración expira las "pendiente" a los 60 s
+// y, además, otra tarjeta suma un timeout de confirmación de 30 s, así que
+// una orden sana termina en ~90 s.
+const COOLDOWN_ORDEN_AUTOMATICA_MS = 120 * 1000;
+
+// Mientras una orden siga en curso ("pendiente", "enviando" o "enviada")
+// bloquea a la nueva de la misma acción hasta esta antigüedad. Pasado ese
+// plazo se la da por varada (servicio caído, orden que nadie cierra) y deja
+// de bloquear, para no impedir la acción para siempre. Es holgadamente
+// mayor que los ~90 s que tarda una orden sana en resolverse.
+const VENTANA_ORDEN_EN_CURSO_MS = 300 * 1000;
+
 // Decimales a los que se redondea el límite de apagado de la
 // histéresis (umbralActivacion - margenHisteresis). Ver
 // evaluarReglaAutomatizacion.
 const DECIMALES_HISTERESIS = 6;
+
+/**
+ * Indica si alguna de las órdenes dadas impide crear una nueva con la
+ * misma acción. Una orden de la acción contraria nunca bloquea. Una de la
+ * misma acción bloquea si se creó hace menos que
+ * COOLDOWN_ORDEN_AUTOMATICA_MS (en cualquier estado) o si sigue en curso y
+ * se creó hace menos que VENTANA_ORDEN_EN_CURSO_MS. Una "creadaEn"
+ * ausente o que no es un Timestamp cuenta como reciente (antigüedad 0).
+ *
+ * @param {FirebaseFirestore.QueryDocumentSnapshot[]} ordenesDocs
+ * @param {string} accionSolicitada "encender" | "apagar".
+ * @param {number} ahoraMs
+ * @returns {boolean}
+ */
+function hayOrdenQueBloquea(ordenesDocs, accionSolicitada, ahoraMs) {
+  return ordenesDocs.some((ordenDoc) => {
+    const orden = ordenDoc.data();
+
+    if (orden.accionSolicitada !== accionSolicitada) {
+      return false;
+    }
+
+    const creadaEn = orden.creadaEn;
+    const antiguedadMs =
+      creadaEn && typeof creadaEn.toMillis === "function"
+        ? ahoraMs - creadaEn.toMillis()
+        : 0;
+
+    return (
+      antiguedadMs < COOLDOWN_ORDEN_AUTOMATICA_MS ||
+      (ESTADOS_ORDEN_EN_CURSO.includes(orden.estado) &&
+        antiguedadMs < VENTANA_ORDEN_EN_CURSO_MS)
+    );
+  });
+}
 
 /**
  * Evalúa una medición contra las reglas de automatización de la
@@ -875,10 +928,13 @@ async function evaluarAutomatizacion(medicion) {
  *
  * Se ignora el ventilador sin documento o en modo "manual". Si su
  * "estadoActual" ya es el deseado no se hace nada; si es null (estado
- * desconocido) cuenta como distinto. Para no acumular órdenes mientras
- * una sigue en curso, no se crea otra con la misma acción si entre las
- * últimas órdenes del ventilador hay una "pendiente", "enviando" o
- * "enviada" (ver ESTADOS_ORDEN_EN_CURSO).
+ * desconocido) cuenta como distinto. Para no acumular órdenes no se crea
+ * otra con la misma acción si entre las últimas órdenes del ventilador
+ * hay una que la bloquea por tiempo (ver hayOrdenQueBloquea,
+ * COOLDOWN_ORDEN_AUTOMATICA_MS y VENTANA_ORDEN_EN_CURSO_MS). La lectura de
+ * esas órdenes y la creación de la nueva van en una transacción: dos
+ * mediciones simultáneas no pueden crear dos órdenes iguales (si una
+ * confirma primero, la otra se reintenta y ve la orden nueva).
  *
  * La orden tiene el mismo formato que las de "enviarComandoVentilador",
  * con origen "automatico" y solicitadoPor "sistema".
@@ -960,38 +1016,36 @@ async function evaluarReglaAutomatizacion(db, reglaDoc, valor) {
 
   const accionSolicitada = estadoDeseado === "encendido" ? "encender" : "apagar";
 
-  const ordenesRecientes = await db
-    .collection(COLECCION_ORDENES_VENTILADOR)
-    .where("ventiladorId", "==", ventiladorId)
-    .orderBy("creadaEn", "desc")
-    .limit(ORDENES_RECIENTES_DEDUPLICACION)
-    .get();
+  const ordenRef = db.collection(COLECCION_ORDENES_VENTILADOR).doc();
 
-  const hayOrdenEnCurso = ordenesRecientes.docs.some((ordenDoc) => {
-    const orden = ordenDoc.data();
-
-    return (
-      orden.accionSolicitada === accionSolicitada &&
-      ESTADOS_ORDEN_EN_CURSO.includes(orden.estado)
+  return db.runTransaction(async (transaction) => {
+    const ordenesRecientes = await transaction.get(
+      db
+        .collection(COLECCION_ORDENES_VENTILADOR)
+        .where("ventiladorId", "==", ventiladorId)
+        .orderBy("creadaEn", "desc")
+        .limit(ORDENES_RECIENTES_DEDUPLICACION)
     );
+
+    const ahoraMs = admin.firestore.Timestamp.now().toMillis();
+
+    if (hayOrdenQueBloquea(ordenesRecientes.docs, accionSolicitada, ahoraMs)) {
+      return null;
+    }
+
+    transaction.create(ordenRef, {
+      ventiladorId,
+      incubadoraId,
+      dispositivoId,
+      accionSolicitada,
+      origen: "automatico",
+      estado: "pendiente",
+      solicitadoPor: "sistema",
+      creadaEn: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return ordenRef.id;
   });
-
-  if (hayOrdenEnCurso) {
-    return null;
-  }
-
-  const ordenRef = await db.collection(COLECCION_ORDENES_VENTILADOR).add({
-    ventiladorId,
-    incubadoraId,
-    dispositivoId,
-    accionSolicitada,
-    origen: "automatico",
-    estado: "pendiente",
-    solicitadoPor: "sistema",
-    creadaEn: admin.firestore.FieldValue.serverTimestamp(),
-  });
-
-  return ordenRef.id;
 }
 
 /**
