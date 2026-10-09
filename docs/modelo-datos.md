@@ -262,7 +262,7 @@ Ningún cliente la escribe (ver `firestore.rules`); solo se puede leer.
 | `incubadoraId`     | `string`    | Copiado de `ventiladores/{ventiladorId}`. La evaluación busca las reglas por incubadora y variable. |
 | `variable`         | `string`    | Variable que se compara: `temperatura` o `humedad`.                             |
 | `umbralActivacion` | `number`    | Valor desde el cual el ventilador debe estar encendido (`valor >= umbralActivacion`). |
-| `margenHisteresis` | `number`    | Ancho de la banda de histéresis: el ventilador debe estar apagado desde `umbralActivacion - margenHisteresis` hacia abajo. Entre ambos límites no se hace nada. Siempre `> 0` y `< umbralActivacion`. |
+| `margenHisteresis` | `number`    | Ancho de la banda de histéresis: el ventilador debe estar apagado desde `umbralActivacion - margenHisteresis` hacia abajo. Entre ambos límites no se hace nada. Siempre `>= 0.01` y `< umbralActivacion`. |
 | `activa`           | `boolean`   | Si es `false`, la regla se conserva pero no se evalúa.                          |
 | `actualizadoEn`    | `timestamp` | Última vez que se guardó la regla (server timestamp).                           |
 | `actualizadoPor`   | `string`    | `uid` del administrador que la guardó.                                          |
@@ -274,14 +274,30 @@ Solo la Cloud Function callable `guardarReglaAutomatizacion` (únicamente
 umbralActivacion, margenHisteresis, activa }` y, **en un solo batch**, cambia
 `ventiladores/{ventiladorId}.modoControl` y crea o reemplaza la regla. Es el
 único camino para cambiar el modo de control de un ventilador: nadie más lo
-escribe, por eso la función recibe el modo y no se separó en dos callables
-(así nunca queda un ventilador en `automatico` o `mixto` sin regla).
+escribe, por eso la función recibe el modo y no se separó en dos callables.
+Como modo y regla se guardan juntos, un ventilador que pasa por esta función a
+`automatico` o `mixto` queda con su regla guardada en la misma operación (la
+regla podría borrarse después a mano con Admin SDK o desde la consola, y en
+`mixto` puede estar inactiva).
 
 - **`automatico` o `mixto`.** Se validan todos los campos de la regla: `variable`
   debe ser `temperatura` o `humedad`; `umbralActivacion` y `margenHisteresis`,
-  números finitos con `0 < margenHisteresis < umbralActivacion` (con otro margen
-  la regla oscilaría sin parar); `activa`, booleano. El ventilador debe existir
-  y tener `incubadoraId`. Si algo falla no se escribe nada.
+  números finitos con `margenHisteresis >= 0.01` y `margenHisteresis <
+  umbralActivacion`; `activa`, booleano. El ventilador debe existir y tener
+  `incubadoraId`. Si algo falla no se escribe nada.
+  - *Margen mínimo de 0,01.* La evaluación redondea el límite de apagado a 6
+    decimales; con márgenes ínfimos ese redondeo deshace la banda y el
+    ventilador oscilaría como si no hubiera histéresis.
+  - *Umbral positivo.* Como el margen es siempre positivo, `margenHisteresis <
+    umbralActivacion` obliga a que el umbral también lo sea: no se pueden
+    configurar reglas con umbrales negativos, cero o menores que el margen.
+  - *Combinación prohibida: `automatico` con `activa: false`.* En modo
+    `automatico` `enviarComandoVentilador` rechaza los comandos manuales, así que
+    una regla inactiva dejaría al ventilador sin ninguna forma de control. Hay
+    que usar `mixto` (acepta manuales y la regla puede estar inactiva) o
+    `manual`.
+  - El `ventiladorId` se usa como id de documento: se rechazan los que contienen
+    `/`, son `.` o `..`, o tienen la forma `__...__`.
 - **`manual`.** Solo cambia el modo. Los demás campos se ignoran y la regla
   guardada se conserva (sin evaluarse mientras el modo sea `manual`).
 

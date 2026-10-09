@@ -35,6 +35,12 @@ const VARIABLES_MEDICION_VALIDAS = ["temperatura", "humedad"];
 // FAN_CONTROL_MODE de frontend/src/utils/constants.js.
 const MODOS_CONTROL_VALIDOS = ["manual", "automatico", "mixto"];
 
+// Margen de histéresis mínimo que acepta guardarReglaAutomatizacion. La
+// evaluación de las reglas (evaluarAutomatizacion) redondea el límite de
+// apagado a 6 decimales: con márgenes ínfimos ese redondeo deshace la
+// banda y el ventilador oscilaría igual que sin histéresis.
+const MARGEN_HISTERESIS_MINIMO = 0.01;
+
 // =========================================================
 // ESTADOS Y TIPOS VÁLIDOS (Sprint 2 — incubadoras/dispositivos)
 //
@@ -1451,8 +1457,9 @@ exports.enviarComandoVentilador = functions.https.onCall(async (data, context) =
 // colecciones están cerradas a escrituras desde el cliente (ver
 // firestore.rules).
 //
-// El modo y la regla se escriben en un solo batch, así que nunca
-// queda un ventilador en modo automático o mixto sin regla.
+// El modo y la regla se escriben en un solo batch: un ventilador que
+// pasa por esta función a modo automático o mixto queda con su regla
+// guardada en la misma operación.
 //
 // Datos esperados (data):
 // {
@@ -1466,6 +1473,11 @@ exports.enviarComandoVentilador = functions.https.onCall(async (data, context) =
 //
 // En modo "manual" solo se cambia el modo: la regla guardada se
 // conserva (no se evalúa) y los demás campos se ignoran.
+//
+// "automatico" con activa: false se rechaza: en modo automático
+// enviarComandoVentilador no admite comandos manuales, así que una
+// regla inactiva dejaría al ventilador sin ninguna forma de control.
+// Con "mixto" (acepta manuales) sí se permite.
 //
 // La regla usa como id el del ventilador (una regla por ventilador)
 // y copia su "incubadoraId": "procesarMedicion" busca las reglas por
@@ -1502,6 +1514,21 @@ exports.guardarReglaAutomatizacion = functions.https.onCall(
       throw new functions.https.HttpsError(
         "invalid-argument",
         "El ventiladorId es obligatorio."
+      );
+    }
+
+    // Se usa como id de documento: Firestore no admite "/", "." ni ".."
+    // ni ids con la forma "__...__"; sin este chequeo llegarían como
+    // un error interno.
+    if (
+      ventiladorId.includes("/") ||
+      ventiladorId === "." ||
+      ventiladorId === ".." ||
+      /^__.*__$/.test(ventiladorId)
+    ) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "El ventiladorId no es válido."
       );
     }
 
@@ -1544,12 +1571,23 @@ exports.guardarReglaAutomatizacion = functions.https.onCall(
       }
 
       // Con un margen <= 0 el ventilador se encendería y apagaría en
-      // el mismo valor; con uno >= al umbral, la banda de apagado
-      // quedaría en cero o por debajo de él.
-      if (margenHisteresis <= 0 || margenHisteresis >= umbralActivacion) {
+      // el mismo valor, y con uno ínfimo el redondeo de la evaluación
+      // deshace la banda (ver MARGEN_HISTERESIS_MINIMO).
+      if (margenHisteresis < MARGEN_HISTERESIS_MINIMO) {
         throw new functions.https.HttpsError(
           "invalid-argument",
-          "El margenHisteresis debe ser mayor que 0 y menor que el umbralActivacion."
+          `El margenHisteresis debe ser al menos ${MARGEN_HISTERESIS_MINIMO}.`
+        );
+      }
+
+      // Con un margen >= al umbral, la banda de apagado quedaría en
+      // cero o por debajo de él. Como el margen mínimo es positivo,
+      // esto también rechaza los umbrales negativos, cero o menores
+      // que el margen.
+      if (margenHisteresis >= umbralActivacion) {
+        throw new functions.https.HttpsError(
+          "invalid-argument",
+          "El umbralActivacion debe ser positivo y mayor que el margenHisteresis."
         );
       }
 
@@ -1557,6 +1595,15 @@ exports.guardarReglaAutomatizacion = functions.https.onCall(
         throw new functions.https.HttpsError(
           "invalid-argument",
           "El campo activa debe ser verdadero o falso."
+        );
+      }
+
+      if (modoControl === "automatico" && !activa) {
+        throw new functions.https.HttpsError(
+          "invalid-argument",
+          "En modo automático la regla debe estar activa: una regla inactiva " +
+            "dejaría al ventilador sin control, porque en ese modo se rechazan " +
+            'los comandos manuales. Usá el modo "mixto" o "manual".'
         );
       }
     }
