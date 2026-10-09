@@ -11,6 +11,8 @@ import IncubadoraForm from "../pages/incubadoras/IncubadoraForm";
 import Alertas from "../pages/alertas/Alertas";
 import AlertaDetalle from "../pages/alertas/AlertaDetalle";
 import ConfiguracionLimites from "../pages/configuracion/ConfiguracionLimites";
+import ControlVentiladores from "../pages/ventiladores/ControlVentiladores";
+import AutomationRuleForm from "../pages/ventiladores/AutomationRuleForm";
 import Usuarios from "../pages/usuarios/Usuarios";
 import UsuarioForm from "../pages/usuarios/UsuarioForm";
 import NotFound from "../pages/errors/NotFound";
@@ -29,8 +31,11 @@ import { ROLES, ROUTES } from "../utils/constants";
 // - Rutas públicas: envueltas en AuthLayout (solo "/login"
 //   por ahora).
 // - Rutas protegidas: exigen sesión activa (ProtectedRoute).
-// - "/usuarios", la gestión de incubadoras y "/configuracion/limites"
-//   además exigen rol "administrador" (RoleRoute).
+// - "/usuarios", la gestión de incubadoras, "/configuracion/limites" y
+//   "/ventiladores/automatizacion" además exigen rol "administrador"
+//   (RoleRoute).
+// - "/ventiladores" exige rol "administrador" u "operador" (RoleRoute): el
+//   usuario de consulta no accede al control de ventiladores.
 //
 // Nota: Dashboard.jsx, DashboardLayout.jsx, NotFound.jsx y
 // Unauthorized.jsx se agregan aquí como placeholders mínimos
@@ -59,6 +64,12 @@ const AppRoutes = () => {
           <Route path={ROUTES.ALERTS} element={<Alertas />} />
           <Route path={ROUTES.ALERT_DETAIL} element={<AlertaDetalle />} />
 
+          <Route
+            element={<RoleRoute roles={[ROLES.ADMIN, ROLES.OPERATOR]} />}
+          >
+            <Route path={ROUTES.FANS} element={<ControlVentiladores />} />
+          </Route>
+
           <Route element={<RoleRoute roles={[ROLES.ADMIN]} />}>
             <Route path={ROUTES.USERS} element={<Usuarios />} />
             <Route path={ROUTES.USER_CREATE} element={<UsuarioForm />} />
@@ -76,6 +87,11 @@ const AppRoutes = () => {
             <Route
               path={ROUTES.THRESHOLDS}
               element={<ConfiguracionLimites />}
+            />
+
+            <Route
+              path={ROUTES.AUTOMATION}
+              element={<AutomationRuleForm />}
             />
           </Route>
         </Route>
