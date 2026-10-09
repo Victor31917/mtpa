@@ -1,6 +1,7 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
+const { construirDocumentoVentilador } = require("./lib/ventilador");
 
 admin.initializeApp();
 
@@ -482,6 +483,9 @@ exports.gestionarIncubadora = functions.https.onCall(async (data, context) => {
  *   incubadoraId: string, // id de la incubadora dueña del dispositivo
  *   tipo: string,         // "sensor_temperatura" | "sensor_humedad" | "ventilador"
  * }
+ *
+ * Si el tipo es "ventilador", también crea ventiladores/{id} (mismo
+ * id que el dispositivo) en la misma escritura atómica.
  */
 exports.crearDispositivo = functions.https.onCall(async (data, context) => {
   // ---------------------------------------------------------
@@ -538,14 +542,36 @@ exports.crearDispositivo = functions.https.onCall(async (data, context) => {
 
   const referencia = db.collection(COLECCION_DISPOSITIVOS).doc();
 
-  await referencia.set({
+  const documentoDispositivo = {
     incubadoraId,
     tipo: data.tipo,
     identificadorMqtt,
     estadoConexion: "desconocido",
     ultimaComunicacionEn: null,
     creadoEn: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  };
+
+  if (data.tipo === "ventilador") {
+    // Un ventilador necesita además su documento en "ventiladores",
+    // con el MISMO id que el dispositivo (relación 1 a 1): es el que
+    // lee "enviarComandoVentilador". Se escriben ambos en un batch
+    // para no dejar nunca uno sin el otro.
+    const batch = db.batch();
+
+    batch.set(referencia, documentoDispositivo);
+    batch.set(
+      db.collection(COLECCION_VENTILADORES).doc(referencia.id),
+      construirDocumentoVentilador({
+        incubadoraId,
+        dispositivoId: referencia.id,
+        creadoEn: admin.firestore.FieldValue.serverTimestamp(),
+      })
+    );
+
+    await batch.commit();
+  } else {
+    await referencia.set(documentoDispositivo);
+  }
 
   return { id: referencia.id, identificadorMqtt };
 });
