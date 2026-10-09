@@ -41,6 +41,159 @@ JSON con esta forma, a partir de una orden de `ordenes_ventilador` (ver
 | `ordenId`      | `string` | Id de la orden en `ordenes_ventilador`; permite correlacionar la confirmación publicada en `.../estado` con la orden. |
 | `solicitadoEn` | `string` | Fecha de creación de la orden (ISO 8601, UTC).                                  |
 
+**Entrega at-least-once.** El comando viaja con QoS 1, que garantiza al menos
+una entrega: el mismo comando puede llegar más de una vez (por ejemplo, la
+librería cliente MQTT reenvía un paquete en vuelo al reconectar) y, tras una
+caída del broker o del servicio, puede llegar tarde. Por eso el dispositivo
+debe:
+
+- ser **idempotente por `ordenId`**: no volver a ejecutar un comando cuyo
+  `ordenId` ya procesó;
+- **descartar los comandos cuyo `solicitadoEn` tenga más de ~60 s** de
+  antigüedad (el mismo máximo que aplica el servicio a las órdenes pendientes,
+  `ORDEN_MAX_ANTIGUEDAD_SEGUNDOS`).
+
+## Payload del estado del ventilador
+
+El ventilador publica en `mtpa/{incubadoraId}/ventiladores/{dispositivoId}/estado`
+un objeto JSON con esta forma (es lo que publica el simulador):
+
+```json
+{
+  "incubadoraId": "incubadora-1",
+  "dispositivoId": "ventilador-1",
+  "encendido": true,
+  "velocidad": 50,
+  "actualizadoEn": "2026-10-01T15:04:06.000Z"
+}
+```
+
+| Campo           | Tipo      | Descripción                                                                 |
+| --------------- | --------- | ------------------------------------------------------------------------------ |
+| `incubadoraId`  | `string`  | Debe coincidir con la del tópico. Si falta se usa la del tópico; si es distinta, el mensaje se descarta. |
+| `dispositivoId` | `string`  | Debe coincidir con el del tópico (que es el id del ventilador). Mismas reglas que `incubadoraId`. |
+| `encendido`     | `boolean` | **Obligatorio.** `true` → `estadoActual: "encendido"`, `false` → `"apagado"` (`FAN_STATUS`). Cualquier otro tipo descarta el mensaje. |
+| `velocidad`     | `number`  | Velocidad reportada (0 a 100). Por ahora el servicio no la guarda.            |
+| `actualizadoEn` | `string`  | Fecha del reporte según el dispositivo (ISO 8601, UTC). El servicio no la usa: escribe su propio server timestamp. |
+
+El mensaje **no** incluye `ordenId`. Si el payload no es válido (ver arriba), el
+servicio descarta el mensaje y lo registra en el log; un fallo al procesarlo no
+afecta al resto de los mensajes (mediciones y latidos).
+
+### Qué hace el servicio al recibirlo
+
+1. Toma `incubadoraId` y `dispositivoId` del tópico. El id del ventilador es el
+   `dispositivoId`.
+2. Actualiza `ventiladores/{dispositivoId}` (`estadoActual` y `actualizadoEn`).
+   Si el documento no existe, o pertenece a otra incubadora que la del tópico, lo
+   registra en el log y **no** lo crea (lo crea `crearDispositivo`).
+3. Busca la orden en curso del ventilador (ver más abajo) y, si el estado
+   reportado es el que pedía, la marca `ejecutada` y guarda `ejecutadaEn`.
+
+Si el ventilador no tiene ninguna orden `enviada` (por ejemplo, un reporte
+espontáneo al arrancar el dispositivo), solo se actualiza `estadoActual`.
+
+Los mensajes de estado de un mismo ventilador se procesan **de a uno, en el
+orden en que llegaron**: un reporte lento de escribir no puede pisar a uno
+posterior. Ventiladores distintos se procesan en paralelo. Este orden vale **por
+instancia** del servicio, no entre instancias: dos instancias corriendo a la
+vez no se coordinan entre sí. Tampoco hay un tiempo máximo por mensaje: si una
+escritura a Firestore queda colgada, los reportes posteriores de ese ventilador
+esperan detrás de ella (límite conocido).
+
+## Confirmación de las órdenes
+
+El estado final de una orden cumplida es **`ejecutada`** (`COMMAND_STATUS.EXECUTED`
+en el frontend); no existe un estado "confirmada". El flujo completo es
+`pendiente` → `enviando` → `enviada` → `ejecutada`, con `fallida` y `expirada`
+como finales alternativos (ver `docs/modelo-datos.md`).
+
+### Secuencia de estados al enviar un comando
+
+1. `pendiente` → `enviando`: el servicio reclama la orden (transacción).
+2. `enviando` → `enviada` (con `enviadaEn`): **se escribe antes de publicar**, en
+   una transacción que exige que la orden siga `enviando`. Así, si el
+   dispositivo responde de inmediato, su estado ya encuentra la orden en
+   `enviada`. Por eso `enviada` significa "el servicio ya la reclamó y está por
+   publicar el comando, o ya lo publicó"; **no garantiza que se haya entregado**.
+3. Se publica el comando, comprobando justo antes que el cliente MQTT siga
+   conectado (la escritura del paso 2 puede tardar y la conexión caerse en el
+   ínterin; un `publish` QoS 1 sin conexión no falla: la librería guarda el
+   paquete y lo entrega al reconectar, sin vencimiento). Si ya no hay conexión,
+   no se publica y `enviada` → `fallida` (transacción, motivo "Se perdió la
+   conexión con el broker antes de publicar el comando"). Si la publicación
+   falla, también `enviada` → `fallida` (transacción, con el motivo en `error`).
+4. Cuando el dispositivo reporta el estado pedido, `enviada` → `ejecutada`.
+
+Si la escritura del paso 2 falla, el comando no se publica y la orden pasa a
+`fallida`. Si el proceso se cae entre los pasos 2 y 3, la orden queda `enviada`
+sin haberse publicado y el barrido (ver más abajo) la marca `fallida`. **El
+servicio no vuelve a publicar una orden** ni la reintenta automáticamente; esto
+no impide que la librería cliente MQTT reenvíe al reconectar un paquete QoS 1
+que ya estaba en vuelo (ver "Entrega at-least-once" arriba).
+
+Casos que quedan fuera de lo anterior:
+
+- **Órdenes `enviando` huérfanas.** Si el proceso muere entre el reclamo
+  (paso 1) y la escritura de `enviada`, o si Firestore tampoco permite marcarla
+  `fallida` tras un fallo del paso 2, la orden queda `enviando`. El barrido solo
+  mira las `enviada`, así que no la cierra: requiere revisión manual (límite
+  conocido). Si en cambio MQTT está caído al momento de reclamar, la orden no se
+  toca (sigue `pendiente`) o, si la conexión cae durante el reclamo, vuelve
+  `enviando` → `pendiente` y se revisa de nuevo al reconectar.
+- **Reporte espontáneo en la ventana previa a la publicación.** Entre el paso 2
+  y el paso 3 la orden ya figura `enviada` aunque todavía no se publicó. Un
+  reporte espontáneo que coincida con su acción en esa ventana estrecha la cierra
+  como `ejecutada`; si luego la publicación falla, la orden queda `ejecutada` sin
+  haberse enviado (la transición a `fallida` exige que siga `enviada`).
+
+### Correlación por "la más reciente en `enviada` que coincide"
+
+Como el estado no trae `ordenId`, el servicio mira las **10 órdenes más
+recientes del ventilador** (consulta por `ventiladorId` ordenada por `creadaEn`
+descendente; el estado y la acción se filtran en memoria) y, de las que están en
+`enviada`, toma la **más reciente cuya acción coincide con el estado
+reportado**: `encender` ↔ `encendido`, `apagar` ↔ `apagado`. Esa orden pasa a
+`ejecutada`; las demás siguen `enviada`. Si ninguna coincide, no se cierra
+ninguna (y `estadoActual` se actualiza igual).
+
+Un reporte espontáneo del dispositivo (por ejemplo, al arrancar) que coincida
+con una orden `enviada` la cierra como `ejecutada` aunque no pruebe que fue la
+respuesta a ese comando.
+
+**Limitación.** Con varias órdenes en vuelo para el mismo ventilador y la misma
+acción, un estado puede cerrar una que no es la que lo provocó; una orden fuera
+de las últimas 10 no se correlaciona. **Alternativa más robusta:**
+que el dispositivo repita en el mensaje de estado el `ordenId` recibido en el
+comando. Eso exige cambiar este contrato, el simulador
+(`iot-integration-service/simulator/simulador.js`) y la correlación del servicio;
+para esta versión se mantiene la correlación por "la más reciente".
+
+### Timeout: órdenes que nadie confirma
+
+Un barrido periódico dentro del servicio (uno al arrancar y luego uno cada 10
+segundos, con una sola consulta `estado == "enviada"`) marca `fallida` toda
+orden `enviada` cuyo `enviadaEn` tenga más antigüedad que el timeout, con el
+motivo en `error`. Si falta `enviadaEn`, se usa `actualizadaEn` y luego
+`creadaEn`; una orden `enviada` sin ninguna de las tres fechas no se puede
+datar y **nunca se barre** (no debería ocurrir: el servicio siempre escribe
+`enviadaEn`). Al no depender de un temporizador por orden, también cierra las
+órdenes que quedaron `enviada` si el servicio se reinició. `estadoActual` no se
+modifica al vencer una orden.
+
+- **Variable de entorno:** `ORDEN_CONFIRMACION_TIMEOUT_SEGUNDOS` (por defecto
+  **30**; un valor inválido se reemplaza por el defecto). El barrido corre cada
+  10 segundos, por lo que una orden puede tardar hasta ese margen más en
+  marcarse.
+- **Carreras.** Tanto `ejecutada` como `fallida` se escriben en una transacción
+  que exige que la orden siga `enviada`: gana quien llegue primero y el otro no
+  pisa el resultado.
+- **Confirmación tardía.** Una orden que ya venció (`fallida`) no se reabre si el
+  dispositivo confirma después; solo se actualiza `estadoActual`.
+- **Relojes.** La antigüedad se calcula con el reloj del servicio contra
+  `enviadaEn`, que es un timestamp del servidor de Firestore. Si los relojes
+  difieren, el vencimiento se corre en esa diferencia. No se corrige.
+
 ## Detección de desconexión
 
 Cada dispositivo debe publicar un mensaje en
@@ -116,11 +269,12 @@ otra.
 
 ## Notas
 
-- El payload del comando de ventilador está definido arriba. El payload
-  exacto de los demás mensajes (formato JSON, campos) se especificará junto
-  con la implementación del Servicio de Integración IoT en el Sprint 2. Este
-  documento fija la convención de nombres de tópicos, el payload del comando
-  y la regla de desconexión, que ya forman parte del contrato entre
+- Los payloads del comando y del estado del ventilador están definidos arriba.
+  El payload exacto de los demás mensajes (formato JSON, campos) se
+  especificará junto con la implementación del Servicio de Integración IoT en
+  el Sprint 2. Este documento fija la convención de nombres de tópicos, los
+  payloads del comando y del estado del ventilador, la confirmación de las
+  órdenes y la regla de desconexión, que ya forman parte del contrato entre
   dispositivos y backend.
 - Ningún cliente del frontend web publica ni se suscribe a estos tópicos
   directamente; el frontend solo lee el estado ya reflejado en Firestore.

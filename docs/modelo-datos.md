@@ -191,16 +191,17 @@ la afecta.
 Representa un ventilador de una incubadora. Es el documento que lee la Cloud
 Function `enviarComandoVentilador` antes de crear una orden. Ningún cliente lo
 escribe (ver `firestore.rules`): lo crea la Cloud Function `crearDispositivo`,
-`guardarReglaAutomatizacion` cambia su `modoControl` y está previsto que el
-Servicio de Integración IoT actualice el estado con Admin SDK (Sprint 4, tarea
-[10]; hoy nada lo escribe).
+`guardarReglaAutomatizacion` cambia su `modoControl` y el Servicio de
+Integración IoT actualiza el estado con Admin SDK cuando el ventilador lo
+reporta (ver `docs/contrato-mqtt.md`).
 
 | Campo          | Tipo     | Descripción                                                                 |
 | -------------- | -------- | ------------------------------------------------------------------------------ |
 | `incubadoraId` | `string` | Incubadora a la que pertenece (`incubadoras/{id}`). Se copia a cada orden.      |
 | `dispositivoId`| `string` | Dispositivo físico asociado (`dispositivos/{id}`, tipo `ventilador`). Junto con `incubadoraId` arma el tópico MQTT del comando (ver `docs/contrato-mqtt.md`). Se copia a cada orden. |
 | `modoControl`  | `string` | Uno de los valores de `FAN_CONTROL_MODE` (`manual`, `automatico`, `mixto`). `enviarComandoVentilador` solo acepta comandos manuales en `manual` y `mixto`. Nace en `manual`. Solo se cambia con `guardarReglaAutomatizacion` (ver `reglas_automatizacion`). |
-| `estadoActual` | `string \| null` | Uno de los valores de `FAN_STATUS` (`encendido`, `apagado`). Nace en `null` (estado desconocido). Está previsto que el Servicio de Integración lo escriba al recibir la confirmación del dispositivo (Sprint 4, tarea [10]); hoy nada lo escribe, así que permanece en `null`. |
+| `estadoActual` | `string \| null` | Uno de los valores de `FAN_STATUS` (`encendido`, `apagado`). Nace en `null` (estado desconocido). El Servicio de Integración lo escribe cada vez que el ventilador publica su estado (`encendido: true` → `encendido`, `false` → `apagado`), haya o no una orden en curso. Una orden que vence sin confirmación no lo modifica. |
+| `actualizadoEn`| `timestamp` | Último estado reportado por el ventilador (server timestamp, lo escribe el Servicio de Integración). No existe hasta el primer reporte. |
 | `creadoEn`     | `timestamp` | Fecha de creación (server timestamp).                                       |
 
 ### Cómo se crean estos documentos
@@ -328,7 +329,8 @@ cliente solo puede leerlas (ver `firestore.rules`).
 | `estado`           | `string`    | Estado de la orden (ver tabla de abajo).                                        |
 | `solicitadoPor`    | `string`    | `uid` del usuario que envió el comando, o `"sistema"` en las órdenes automáticas. |
 | `creadaEn`         | `timestamp` | Fecha de creación (server timestamp). El Servicio de Integración descarta las órdenes pendientes demasiado antiguas. |
-| `enviadaEn`        | `timestamp` | Momento en que el comando se publicó en MQTT (lo escribe el Servicio de Integración). |
+| `enviadaEn`        | `timestamp` | Momento en que el Servicio de Integración pasó la orden a `enviada`, justo antes de publicar el comando en MQTT. El timeout de confirmación se cuenta desde aquí. |
+| `ejecutadaEn`      | `timestamp` | Momento en que el servicio registró la confirmación del dispositivo (estado `ejecutada`). Solo existe en órdenes ejecutadas. |
 | `actualizadaEn`    | `timestamp` | Último cambio de `estado` hecho por el Servicio de Integración.                 |
 | `error`            | `string`    | Motivo, cuando el estado es `fallida` o `expirada`.                             |
 
@@ -340,11 +342,11 @@ ampliado con `enviando` y `expirada`, que usa el Servicio de Integración:
 | Estado       | Significado                                                                  | Lo escribe |
 | ------------ | ------------------------------------------------------------------------------ | ---------- |
 | `pendiente`  | Orden creada, todavía no tomada por el Servicio de Integración.                | `enviarComandoVentilador` o `evaluarAutomatizacion` |
-| `enviando`   | El Servicio de Integración tomó la orden (transacción `pendiente` → `enviando`) y está publicando el comando; evita doble publicación. | Servicio de Integración |
-| `enviada`    | El comando se publicó en MQTT (`enviadaEn`).                                    | Servicio de Integración |
-| `ejecutada`  | El dispositivo confirmó el cambio por `.../estado`. Pendiente de implementar.   | Servicio de Integración (trabajo futuro) |
-| `fallida`    | La orden es inválida o no pudo publicarse (ver `error`).                        | Servicio de Integración |
-| `expirada`   | Seguía `pendiente` pasado el tiempo máximo (`ORDEN_MAX_ANTIGUEDAD_SEGUNDOS`) y no se envió, para no accionar un ventilador con una orden vieja. | Servicio de Integración |
+| `enviando`   | El Servicio de Integración reclamó la orden (transacción `pendiente` → `enviando`); todavía no se escribió `enviada`. Evita doble publicación. Si el proceso muere en este estado, la orden queda `enviando` (el barrido solo mira `enviada`; ver `docs/contrato-mqtt.md`). | Servicio de Integración |
+| `enviada`    | El servicio ya reclamó la orden y está por publicar el comando, o ya lo publicó (`enviadaEn`). Se escribe antes de publicar; no garantiza la entrega. | Servicio de Integración |
+| `ejecutada`  | El dispositivo confirmó el cambio por `.../estado` (`ejecutadaEn`).             | Servicio de Integración |
+| `fallida`    | La orden es inválida, no pudo publicarse, o fue enviada y el dispositivo no la confirmó a tiempo (ver `error`; el timeout es `ORDEN_CONFIRMACION_TIMEOUT_SEGUNDOS`, 30 s por defecto). | Servicio de Integración |
+| `expirada`   | Seguía `pendiente` pasado el tiempo máximo (`ORDEN_MAX_ANTIGUEDAD_SEGUNDOS`; se evalúa al reclamarla, no mientras el servicio o MQTT están caídos) y no se envió, para no accionar un ventilador con una orden vieja. | Servicio de Integración |
 
 Flujo normal: `pendiente` → `enviando` → `enviada` → `ejecutada`; las
 alternativas finales son `fallida` y `expirada`.
@@ -379,11 +381,22 @@ después de guardar cada medición y de evaluar los umbrales. Aplica las reglas 
   en curso (`pendiente`, `enviando` o `enviada`) y se creó hace menos de
   **300 s**. Así no se genera una orden por medición mientras `estadoActual`
   no se actualiza, los reintentos tras un fallo quedan espaciados y una orden
-  varada deja de bloquear la acción pasados 5 minutos. Una `creadaEn` ausente o
-  que no es un timestamp se trata como reciente. Una orden de la acción
-  contraria nunca bloquea. Los 120 s superan lo que tarda una orden sana en
-  resolverse (el Servicio de Integración expira las `pendiente` a los 60 s;
-  otra tarea prevé además un timeout de confirmación de 30 s).
+  varada deja de bloquear la acción pasados 5 minutos. Una orden sin `creadaEn`
+  no aparece en la consulta ordenada (Firestore excluye los documentos sin el
+  campo del `orderBy`), así que no se ve; solo se trata como reciente una
+  `creadaEn` presente que no sea un timestamp. Una orden de la acción contraria
+  nunca bloquea. Los 120 s superan lo que tarda una orden sana en resolverse (el
+  Servicio de Integración expira las `pendiente` **al reclamarlas** a los 60 s
+  y marca `fallida` las `enviada` que no se confirman en 30 s, más hasta 10 s
+  del barrido: una orden sana termina en ~100 s como máximo; mientras el
+  servicio o MQTT están caídos las `pendiente` no se expiran).
+- **El cooldown es un tiempo mínimo entre ciclos de la misma acción.** Es una
+  decisión de diseño que protege el motor del ventilador, no solo una
+  deduplicación. Ejemplo: se pide apagar en t=0, encender en t=10 y la
+  medición de t=30 vuelve a necesitar apagar: esa nueva orden `apagar` queda
+  diferida hasta t=120 (la orden `apagar` de t=0 sigue dentro del cooldown). Se
+  recupera sola con la primera medición posterior al cooldown que siga fuera de
+  banda.
 - **Atomicidad.** La lectura de las órdenes recientes y la creación de la nueva
   van en una transacción de Firestore: dos mediciones simultáneas no crean dos
   órdenes iguales (la segunda se reintenta y ve la orden de la primera).
@@ -397,9 +410,10 @@ después de guardar cada medición y de evaluar los umbrales. Aplica las reglas 
     siguiente medición fuera de banda, si ya pasó el cooldown.
   - Una orden manual de la misma acción también cuenta para el cooldown y la
     ventana (la deduplicación no distingue el `origen`).
-  - Mientras ninguna tarea actualice `estadoActual` (Sprint 4, tarea [10]),
-    la automatización pide a lo sumo una orden por acción cada 120 s si
-    terminan, o cada 300 s si quedan varadas.
+  - Si el ventilador no reporta su estado (dispositivo apagado o sin
+    comunicación), `estadoActual` no se actualiza y la automatización pide a lo
+    sumo una orden por acción cada 120 s si terminan, o cada 300 s si quedan
+    varadas.
   - La atomicidad se apoya en que la consulta dentro de la transacción impide
     inserciones concurrentes; no se probó contra Firestore real.
 
