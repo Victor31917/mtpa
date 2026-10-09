@@ -800,15 +800,16 @@ const ESTADOS_ORDEN_EN_CURSO = ["pendiente", "enviando", "enviada"];
 // del ventilador no se actualiza o el servicio no responde, y espacia los
 // reintentos tras un fallo. Se eligió mayor que lo que tarda una orden en
 // resolverse: el Servicio de Integración expira las "pendiente" a los 60 s
-// y, además, otra tarjeta suma un timeout de confirmación de 30 s, así que
-// una orden sana termina en ~90 s.
+// y marca "fallida" las "enviada" que el dispositivo no confirma en 30 s
+// (más hasta 10 s del barrido), así que una orden sana termina en ~100 s
+// como máximo.
 const COOLDOWN_ORDEN_AUTOMATICA_MS = 120 * 1000;
 
 // Mientras una orden siga en curso ("pendiente", "enviando" o "enviada")
 // bloquea a la nueva de la misma acción hasta esta antigüedad. Pasado ese
 // plazo se la da por varada (servicio caído, orden que nadie cierra) y deja
 // de bloquear, para no impedir la acción para siempre. Es holgadamente
-// mayor que los ~90 s que tarda una orden sana en resolverse.
+// mayor que los ~100 s que tarda una orden sana en resolverse.
 const VENTANA_ORDEN_EN_CURSO_MS = 300 * 1000;
 
 // Decimales a los que se redondea el límite de apagado de la

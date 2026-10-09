@@ -384,8 +384,9 @@ después de guardar cada medición y de evaluar los umbrales. Aplica las reglas 
   varada deja de bloquear la acción pasados 5 minutos. Una `creadaEn` ausente o
   que no es un timestamp se trata como reciente. Una orden de la acción
   contraria nunca bloquea. Los 120 s superan lo que tarda una orden sana en
-  resolverse (el Servicio de Integración expira las `pendiente` a los 60 s;
-  otra tarea prevé además un timeout de confirmación de 30 s).
+  resolverse (el Servicio de Integración expira las `pendiente` a los 60 s y
+  marca `fallida` las `enviada` que no se confirman en 30 s, más hasta 10 s del
+  barrido: una orden sana termina en ~100 s como máximo).
 - **Atomicidad.** La lectura de las órdenes recientes y la creación de la nueva
   van en una transacción de Firestore: dos mediciones simultáneas no crean dos
   órdenes iguales (la segunda se reintenta y ve la orden de la primera).
@@ -399,9 +400,10 @@ después de guardar cada medición y de evaluar los umbrales. Aplica las reglas 
     siguiente medición fuera de banda, si ya pasó el cooldown.
   - Una orden manual de la misma acción también cuenta para el cooldown y la
     ventana (la deduplicación no distingue el `origen`).
-  - Mientras ninguna tarea actualice `estadoActual` (Sprint 4, tarea [10]),
-    la automatización pide a lo sumo una orden por acción cada 120 s si
-    terminan, o cada 300 s si quedan varadas.
+  - Si el ventilador no reporta su estado (dispositivo apagado o sin
+    comunicación), `estadoActual` no se actualiza y la automatización pide a lo
+    sumo una orden por acción cada 120 s si terminan, o cada 300 s si quedan
+    varadas.
   - La atomicidad se apoya en que la consulta dentro de la transacción impide
     inserciones concurrentes; no se probó contra Firestore real.
 
