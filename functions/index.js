@@ -799,10 +799,17 @@ const ESTADOS_ORDEN_EN_CURSO = ["pendiente", "enviando", "enviada"];
 // una orden por medición (cada ~8 s con el simulador) mientras el estado
 // del ventilador no se actualiza o el servicio no responde, y espacia los
 // reintentos tras un fallo. Se eligió mayor que lo que tarda una orden en
-// resolverse: el Servicio de Integración expira las "pendiente" a los 60 s
-// y marca "fallida" las "enviada" que el dispositivo no confirma en 30 s
-// (más hasta 10 s del barrido), así que una orden sana termina en ~100 s
-// como máximo.
+// resolverse: el Servicio de Integración expira las "pendiente" al
+// reclamarlas, a los 60 s (mientras el servicio o MQTT están caídos no se
+// expiran), y marca "fallida" las "enviada" que el dispositivo no confirma
+// en 30 s (más hasta 10 s del barrido), así que una orden sana termina en
+// ~100 s como máximo.
+//
+// Es además un TIEMPO MÍNIMO ENTRE CICLOS de la misma acción, y es
+// deliberado: protege el motor del ventilador. Por ejemplo, apagar en t=0,
+// encender en t=10 y una nueva necesidad de apagar en t=30 queda diferida
+// hasta t=120; se recupera sola con la primera medición posterior al
+// cooldown que siga fuera de banda.
 const COOLDOWN_ORDEN_AUTOMATICA_MS = 120 * 1000;
 
 // Mientras una orden siga en curso ("pendiente", "enviando" o "enviada")
@@ -823,7 +830,9 @@ const DECIMALES_HISTERESIS = 6;
  * misma acción bloquea si se creó hace menos que
  * COOLDOWN_ORDEN_AUTOMATICA_MS (en cualquier estado) o si sigue en curso y
  * se creó hace menos que VENTANA_ORDEN_EN_CURSO_MS. Una "creadaEn"
- * ausente o que no es un Timestamp cuenta como reciente (antigüedad 0).
+ * presente que no es un Timestamp cuenta como reciente (antigüedad 0); una
+ * orden sin "creadaEn" no aparece en la consulta ordenada, así que aquí no
+ * llega.
  *
  * @param {FirebaseFirestore.QueryDocumentSnapshot[]} ordenesDocs
  * @param {string} accionSolicitada "encender" | "apagar".

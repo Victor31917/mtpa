@@ -41,6 +41,18 @@ JSON con esta forma, a partir de una orden de `ordenes_ventilador` (ver
 | `ordenId`      | `string` | Id de la orden en `ordenes_ventilador`; permite correlacionar la confirmación publicada en `.../estado` con la orden. |
 | `solicitadoEn` | `string` | Fecha de creación de la orden (ISO 8601, UTC).                                  |
 
+**Entrega at-least-once.** El comando viaja con QoS 1, que garantiza al menos
+una entrega: el mismo comando puede llegar más de una vez (por ejemplo, la
+librería cliente MQTT reenvía un paquete en vuelo al reconectar) y, tras una
+caída del broker o del servicio, puede llegar tarde. Por eso el dispositivo
+debe:
+
+- ser **idempotente por `ordenId`**: no volver a ejecutar un comando cuyo
+  `ordenId` ya procesó;
+- **descartar los comandos cuyo `solicitadoEn` tenga más de ~60 s** de
+  antigüedad (el mismo máximo que aplica el servicio a las órdenes pendientes,
+  `ORDEN_MAX_ANTIGUEDAD_SEGUNDOS`).
+
 ## Payload del estado del ventilador
 
 El ventilador publica en `mtpa/{incubadoraId}/ventiladores/{dispositivoId}/estado`
@@ -83,7 +95,11 @@ espontáneo al arrancar el dispositivo), solo se actualiza `estadoActual`.
 
 Los mensajes de estado de un mismo ventilador se procesan **de a uno, en el
 orden en que llegaron**: un reporte lento de escribir no puede pisar a uno
-posterior. Ventiladores distintos se procesan en paralelo.
+posterior. Ventiladores distintos se procesan en paralelo. Este orden vale **por
+instancia** del servicio, no entre instancias: dos instancias corriendo a la
+vez no se coordinan entre sí. Tampoco hay un tiempo máximo por mensaje: si una
+escritura a Firestore queda colgada, los reportes posteriores de ese ventilador
+esperan detrás de ella (límite conocido).
 
 ## Confirmación de las órdenes
 
@@ -100,15 +116,36 @@ como finales alternativos (ver `docs/modelo-datos.md`).
    dispositivo responde de inmediato, su estado ya encuentra la orden en
    `enviada`. Por eso `enviada` significa "el servicio ya la reclamó y está por
    publicar el comando, o ya lo publicó"; **no garantiza que se haya entregado**.
-3. Se publica el comando. Si la publicación falla, `enviada` → `fallida`
-   (transacción, con el motivo en `error`).
+3. Se publica el comando, comprobando justo antes que el cliente MQTT siga
+   conectado (la escritura del paso 2 puede tardar y la conexión caerse en el
+   ínterin; un `publish` QoS 1 sin conexión no falla: la librería guarda el
+   paquete y lo entrega al reconectar, sin vencimiento). Si ya no hay conexión,
+   no se publica y `enviada` → `fallida` (transacción, motivo "Se perdió la
+   conexión con el broker antes de publicar el comando"). Si la publicación
+   falla, también `enviada` → `fallida` (transacción, con el motivo en `error`).
 4. Cuando el dispositivo reporta el estado pedido, `enviada` → `ejecutada`.
 
 Si la escritura del paso 2 falla, el comando no se publica y la orden pasa a
 `fallida`. Si el proceso se cae entre los pasos 2 y 3, la orden queda `enviada`
-sin haberse publicado y el barrido (ver más abajo) la marca `fallida`: **un
-comando nunca se republica** ni se reintenta automáticamente. Límite conocido:
-si Firestore tampoco permite marcarla `fallida`, la orden queda `enviando`.
+sin haberse publicado y el barrido (ver más abajo) la marca `fallida`. **El
+servicio no vuelve a publicar una orden** ni la reintenta automáticamente; esto
+no impide que la librería cliente MQTT reenvíe al reconectar un paquete QoS 1
+que ya estaba en vuelo (ver "Entrega at-least-once" arriba).
+
+Casos que quedan fuera de lo anterior:
+
+- **Órdenes `enviando` huérfanas.** Si el proceso muere entre el reclamo
+  (paso 1) y la escritura de `enviada`, o si Firestore tampoco permite marcarla
+  `fallida` tras un fallo del paso 2, la orden queda `enviando`. El barrido solo
+  mira las `enviada`, así que no la cierra: requiere revisión manual (límite
+  conocido). Si en cambio MQTT está caído al momento de reclamar, la orden no se
+  toca (sigue `pendiente`) o, si la conexión cae durante el reclamo, vuelve
+  `enviando` → `pendiente` y se revisa de nuevo al reconectar.
+- **Reporte espontáneo en la ventana previa a la publicación.** Entre el paso 2
+  y el paso 3 la orden ya figura `enviada` aunque todavía no se publicó. Un
+  reporte espontáneo que coincida con su acción en esa ventana estrecha la cierra
+  como `ejecutada`; si luego la publicación falla, la orden queda `ejecutada` sin
+  haberse enviado (la transición a `fallida` exige que siga `enviada`).
 
 ### Correlación por "la más reciente en `enviada` que coincide"
 
@@ -138,7 +175,9 @@ Un barrido periódico dentro del servicio (uno al arrancar y luego uno cada 10
 segundos, con una sola consulta `estado == "enviada"`) marca `fallida` toda
 orden `enviada` cuyo `enviadaEn` tenga más antigüedad que el timeout, con el
 motivo en `error`. Si falta `enviadaEn`, se usa `actualizadaEn` y luego
-`creadaEn`. Al no depender de un temporizador por orden, también cierra las
+`creadaEn`; una orden `enviada` sin ninguna de las tres fechas no se puede
+datar y **nunca se barre** (no debería ocurrir: el servicio siempre escribe
+`enviadaEn`). Al no depender de un temporizador por orden, también cierra las
 órdenes que quedaron `enviada` si el servicio se reinició. `estadoActual` no se
 modifica al vencer una orden.
 

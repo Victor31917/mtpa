@@ -342,11 +342,11 @@ ampliado con `enviando` y `expirada`, que usa el Servicio de Integración:
 | Estado       | Significado                                                                  | Lo escribe |
 | ------------ | ------------------------------------------------------------------------------ | ---------- |
 | `pendiente`  | Orden creada, todavía no tomada por el Servicio de Integración.                | `enviarComandoVentilador` o `evaluarAutomatizacion` |
-| `enviando`   | El Servicio de Integración tomó la orden (transacción `pendiente` → `enviando`) y está publicando el comando; evita doble publicación. | Servicio de Integración |
+| `enviando`   | El Servicio de Integración reclamó la orden (transacción `pendiente` → `enviando`); todavía no se escribió `enviada`. Evita doble publicación. Si el proceso muere en este estado, la orden queda `enviando` (el barrido solo mira `enviada`; ver `docs/contrato-mqtt.md`). | Servicio de Integración |
 | `enviada`    | El servicio ya reclamó la orden y está por publicar el comando, o ya lo publicó (`enviadaEn`). Se escribe antes de publicar; no garantiza la entrega. | Servicio de Integración |
 | `ejecutada`  | El dispositivo confirmó el cambio por `.../estado` (`ejecutadaEn`).             | Servicio de Integración |
 | `fallida`    | La orden es inválida, no pudo publicarse, o fue enviada y el dispositivo no la confirmó a tiempo (ver `error`; el timeout es `ORDEN_CONFIRMACION_TIMEOUT_SEGUNDOS`, 30 s por defecto). | Servicio de Integración |
-| `expirada`   | Seguía `pendiente` pasado el tiempo máximo (`ORDEN_MAX_ANTIGUEDAD_SEGUNDOS`) y no se envió, para no accionar un ventilador con una orden vieja. | Servicio de Integración |
+| `expirada`   | Seguía `pendiente` pasado el tiempo máximo (`ORDEN_MAX_ANTIGUEDAD_SEGUNDOS`; se evalúa al reclamarla, no mientras el servicio o MQTT están caídos) y no se envió, para no accionar un ventilador con una orden vieja. | Servicio de Integración |
 
 Flujo normal: `pendiente` → `enviando` → `enviada` → `ejecutada`; las
 alternativas finales son `fallida` y `expirada`.
@@ -381,12 +381,22 @@ después de guardar cada medición y de evaluar los umbrales. Aplica las reglas 
   en curso (`pendiente`, `enviando` o `enviada`) y se creó hace menos de
   **300 s**. Así no se genera una orden por medición mientras `estadoActual`
   no se actualiza, los reintentos tras un fallo quedan espaciados y una orden
-  varada deja de bloquear la acción pasados 5 minutos. Una `creadaEn` ausente o
-  que no es un timestamp se trata como reciente. Una orden de la acción
-  contraria nunca bloquea. Los 120 s superan lo que tarda una orden sana en
-  resolverse (el Servicio de Integración expira las `pendiente` a los 60 s y
-  marca `fallida` las `enviada` que no se confirman en 30 s, más hasta 10 s del
-  barrido: una orden sana termina en ~100 s como máximo).
+  varada deja de bloquear la acción pasados 5 minutos. Una orden sin `creadaEn`
+  no aparece en la consulta ordenada (Firestore excluye los documentos sin el
+  campo del `orderBy`), así que no se ve; solo se trata como reciente una
+  `creadaEn` presente que no sea un timestamp. Una orden de la acción contraria
+  nunca bloquea. Los 120 s superan lo que tarda una orden sana en resolverse (el
+  Servicio de Integración expira las `pendiente` **al reclamarlas** a los 60 s
+  y marca `fallida` las `enviada` que no se confirman en 30 s, más hasta 10 s
+  del barrido: una orden sana termina en ~100 s como máximo; mientras el
+  servicio o MQTT están caídos las `pendiente` no se expiran).
+- **El cooldown es un tiempo mínimo entre ciclos de la misma acción.** Es una
+  decisión de diseño que protege el motor del ventilador, no solo una
+  deduplicación. Ejemplo: se pide apagar en t=0, encender en t=10 y la
+  medición de t=30 vuelve a necesitar apagar: esa nueva orden `apagar` queda
+  diferida hasta t=120 (la orden `apagar` de t=0 sigue dentro del cooldown). Se
+  recupera sola con la primera medición posterior al cooldown que siga fuera de
+  banda.
 - **Atomicidad.** La lectura de las órdenes recientes y la creación de la nueva
   van en una transacción de Firestore: dos mediciones simultáneas no crean dos
   órdenes iguales (la segunda se reintenta y ve la orden de la primera).

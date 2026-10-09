@@ -947,11 +947,6 @@ async function marcarOrden(ordenRef, estado, campos = {}) {
  * @returns {Promise<void>}
  */
 async function marcarOrdenFallida(ordenRef, motivo, desde = null) {
-  console.error(
-    `[iot-integration-service] Orden ${ordenRef.id} fallida: ` +
-      motivo
-  );
-
   try {
     if (desde) {
       const orden = await transicionarOrden(
@@ -966,18 +961,23 @@ async function marcarOrdenFallida(ordenRef, motivo, desde = null) {
           `[iot-integration-service] La orden ${ordenRef.id} ya no ` +
             `estaba en "${desde}"; no se marca fallida.`
         );
-      }
 
-      return;
+        return;
+      }
+    } else {
+      await marcarOrden(ordenRef, ESTADO_ORDEN.FALLIDA, {
+        error: motivo,
+      });
     }
 
-    await marcarOrden(ordenRef, ESTADO_ORDEN.FALLIDA, {
-      error: motivo,
-    });
+    console.error(
+      `[iot-integration-service] Orden ${ordenRef.id} fallida: ` +
+        motivo
+    );
   } catch (error) {
     console.error(
       `[iot-integration-service] No se pudo marcar la orden ` +
-        `${ordenRef.id} como fallida:`,
+        `${ordenRef.id} como fallida (${motivo}):`,
       error
     );
   }
@@ -1474,9 +1474,12 @@ async function procesarOrdenPendiente(ordenDoc, cliente) {
   try {
     await enviarOrdenReclamada(ordenRef, orden, cliente);
   } catch (error) {
+    // Un error inesperado ocurre antes de escribir "enviada"; con la
+    // precondición no se pisa una orden que otro proceso ya cerró.
     await marcarOrdenFallida(
       ordenRef,
-      `Error inesperado: ${error.message}`
+      `Error inesperado: ${error.message}`,
+      ESTADO_ORDEN.ENVIANDO
     );
   }
 }
@@ -1581,7 +1584,7 @@ async function enviarOrdenReclamada(ordenRef, orden, cliente) {
   // Si esta escritura falla no se publica: la orden pasa a "fallida"
   // con el motivo. Si el proceso muere entre esta escritura y la
   // publicación, la orden queda "enviada" y el barrido la cierra como
-  // fallida: el comando NUNCA se republica.
+  // fallida: el servicio no vuelve a publicar una orden.
   //
 
   let enviada;
@@ -1614,6 +1617,23 @@ async function enviarOrdenReclamada(ordenRef, orden, cliente) {
   // -------------------------------------------------------
   // Publicar comando
   // -------------------------------------------------------
+  //
+  // La escritura de "enviada" pudo tardar y la conexión caerse
+  // mientras tanto. Publicar sin conexión no falla: el cliente MQTT
+  // guarda el paquete y lo entrega al reconectar, sin vencimiento,
+  // cuando la orden ya figura fallida y quizás vencida. Por eso se
+  // vuelve a comprobar aquí, sin ningún "await" entre el chequeo y la
+  // llamada a publish.
+  //
+
+  if (!cliente.connected) {
+    await marcarOrdenFallida(
+      ordenRef,
+      "Se perdió la conexión con el broker antes de publicar el comando",
+      ESTADO_ORDEN.ENVIADA
+    );
+    return;
+  }
 
   try {
     await publicarMensaje(cliente, topico, payload);
