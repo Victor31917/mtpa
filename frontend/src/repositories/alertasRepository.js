@@ -37,14 +37,18 @@ const LIMITE_POR_DEFECTO = 50;
  *
  * Sin filtros usa orderBy("creadaEn") + limit. Con "estado" y/o
  * "incubadoraId" filtra en el servidor con igualdades simples
- * (where "==") y ordena y recorta en el cliente: así el límite se
- * aplica DESPUÉS del filtro y una alerta antigua que cumple el
- * filtro no se pierde por haber quedado fuera de las últimas N.
- * Ninguna de las dos consultas requiere índice compuesto (un
- * where más un orderBy en otro campo sí lo exigiría).
+ * (where "==", o where "in" si "estado" es una lista de estados) y
+ * ordena y recorta en el cliente: así el límite se aplica DESPUÉS
+ * del filtro y una alerta antigua que cumple el filtro no se
+ * pierde por haber quedado fuera de las últimas N. Ninguna de las
+ * dos consultas requiere índice compuesto (un where más un orderBy
+ * en otro campo sí lo exigiría).
  *
  * @param {Object} [filtros]
- * @param {string} [filtros.estado] Ej.: ALERT_STATUS.ACTIVE.
+ * @param {string|string[]} [filtros.estado] Un estado (ej.:
+ * ALERT_STATUS.ACTIVE) o una lista de estados (ej.: las alertas
+ * abiertas, [ALERT_STATUS.ACTIVE, ALERT_STATUS.ACKNOWLEDGED]). Una lista
+ * vacía no filtra por estado.
  * @param {string} [filtros.incubadoraId]
  * @param {number} [filtros.limite] Máximo de alertas leídas (50 por defecto).
  * @param {(alertas: Object[]) => void} onCambio Se invoca con la lista
@@ -66,7 +70,12 @@ export const suscribirseAlertas = (
 
   const filtrosServidor = [];
 
-  if (estado) {
+  if (Array.isArray(estado)) {
+    // "in" falla con una lista vacía, por eso solo se agrega si hay estados.
+    if (estado.length > 0) {
+      filtrosServidor.push(where("estado", "in", estado));
+    }
+  } else if (estado) {
     filtrosServidor.push(where("estado", "==", estado));
   }
 
