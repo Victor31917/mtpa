@@ -1,0 +1,246 @@
+/* =========================================================
+   M.T.P.A. - CONTROL DE VENTILADORES
+   La estructura de página, tarjetas, mensajes y estado vacío
+   salen de las utilidades de global.css; aquí solo lo propio.
+   ========================================================= */
+
+.ventiladores-page {
+  max-width: var(--content-max-width);
+}
+
+.ventiladores-selector {
+  max-width: 420px;
+  margin-bottom: var(--spacing-6);
+}
+
+.ventiladores-estado {
+  padding: var(--spacing-8);
+
+  color: var(--color-text-secondary);
+
+  text-align: center;
+}
+
+.ventiladores-mensaje {
+  margin-bottom: var(--spacing-4);
+}
+
+.ventiladores-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+
+  gap: var(--spacing-5);
+}
+
+.ventiladores-card {
+  display: flex;
+  flex-direction: column;
+
+  gap: var(--spacing-4);
+}
+
+.ventiladores-card .card__header,
+.ventiladores-card .card__footer {
+  margin: 0;
+}
+
+.ventiladores-card .card__footer {
+  justify-content: flex-start;
+
+  padding-top: var(--spacing-4);
+}
+
+/* ---------------------------------------------------------
+   Estado actual del ventilador
+   --------------------------------------------------------- */
+
+.ventiladores-estado-actual {
+  flex-shrink: 0;
+
+  padding: var(--spacing-1) var(--spacing-3);
+
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.ventiladores-estado-actual--encendido {
+  color: var(--color-fan);
+  background-color: var(--color-fan-light);
+}
+
+.ventiladores-estado-actual--apagado {
+  color: var(--color-text-secondary);
+  background-color: var(--color-background-secondary);
+}
+
+/* "Desconocido" no es lo mismo que apagado: se distingue con borde punteado. */
+.ventiladores-estado-actual--desconocido {
+  color: var(--color-text-muted);
+  background-color: var(--color-surface);
+
+  border-color: var(--color-border-dark);
+  border-style: dashed;
+}
+
+/* ---------------------------------------------------------
+   Datos del ventilador
+   --------------------------------------------------------- */
+
+.ventiladores-datos {
+  margin: 0;
+}
+
+.ventiladores-datos__fila {
+  display: flex;
+  justify-content: space-between;
+
+  gap: var(--spacing-4);
+
+  padding: var(--spacing-3) 0;
+
+  border-top: 1px solid var(--color-border-light);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.ventiladores-datos__fila dt {
+  color: var(--color-text-secondary);
+
+  font-size: var(--font-size-sm);
+}
+
+.ventiladores-datos__fila dd {
+  margin: 0;
+
+  color: var(--color-text-primary);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+
+  text-align: right;
+}
+
+/* ---------------------------------------------------------
+   Última orden
+   --------------------------------------------------------- */
+
+.ventiladores-orden {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+
+  gap: var(--spacing-2);
+}
+
+.ventiladores-orden__titulo {
+  color: var(--color-text-secondary);
+
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.ventiladores-orden__texto {
+  font-size: var(--font-size-sm);
+}
+
+.ventiladores-orden__detalle {
+  color: var(--color-text-secondary);
+
+  font-size: var(--font-size-xs);
+}
+
+.ventiladores-orden__falla {
+  width: 100%;
+}
+
+.ventiladores-orden__falla .ventiladores-orden__detalle {
+  margin-top: var(--spacing-1);
+
+  color: inherit;
+}
+
+/* ---------------------------------------------------------
+   Acciones
+   --------------------------------------------------------- */
+
+.ventiladores-acciones {
+  display: flex;
+
+  gap: var(--spacing-3);
+}
+
+.ventiladores-btn {
+  flex: 1;
+
+  min-height: var(--button-height);
+
+  padding: var(--spacing-3) var(--spacing-5);
+
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+
+  cursor: pointer;
+
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.ventiladores-btn--encender {
+  color: var(--color-text-light);
+  background-color: var(--color-primary);
+}
+
+.ventiladores-btn--encender:hover:not(:disabled) {
+  background-color: var(--color-primary-hover);
+}
+
+.ventiladores-btn--apagar {
+  color: var(--color-primary);
+  background-color: var(--color-surface);
+}
+
+.ventiladores-btn--apagar:hover:not(:disabled) {
+  background-color: var(--color-primary-lighter);
+}
+
+.ventiladores-btn:focus-visible {
+  outline: none;
+
+  box-shadow: var(--focus-ring);
+}
+
+.ventiladores-btn:disabled {
+  opacity: 0.7;
+
+  cursor: not-allowed;
+}
+
+.ventiladores-motivo {
+  color: var(--color-text-secondary);
+
+  font-size: var(--font-size-xs);
+}
+
+.ventiladores-enlace {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+@media (max-width: 576px) {
+  .ventiladores-selector {
+    max-width: none;
+  }
+
+  .ventiladores-grid {
+    grid-template-columns: 1fr;
+  }
+}
