@@ -89,7 +89,11 @@ pantalla de configuración de límites (no pasa por una Cloud Function).
 Una alerta registra que una variable salió del rango definido en su umbral.
 La crea `evaluarUmbrales` (dentro de `procesarMedicion`, con Admin SDK); al
 crearse, la Cloud Function `notificarAlerta` envía el correo de aviso.
-Cualquier usuario autenticado puede leerlas.
+Cualquier usuario autenticado puede leerlas. La colección también guarda las
+alertas de desconexión de dispositivos (ver
+[Alertas de desconexión](#alertas-de-desconexión-de-dispositivos)), que no
+tienen `variable`, `valor`, `limite` ni `medidoEn`; la tabla describe las
+alertas de umbral.
 
 | Campo             | Tipo        | Descripción                                                              |
 | ----------------- | ----------- | --------------------------------------------------------------------------- |
@@ -146,6 +150,41 @@ otra. Una alerta `resuelta` no bloquea: si la condición reaparece, se crea una
 alerta nueva (y se envía un nuevo correo). Si el valor salta de un extremo al
 otro del rango, la alerta `alta` se resuelve y se crea la `baja` (o al revés)
 en la misma medición.
+
+### Alertas de desconexión de dispositivos
+
+Cuando un dispositivo deja de enviar señales, el Servicio de Integración IoT
+(`iot-integration-service/lib/estado-conexion.js`, con Admin SDK) lo marca
+`desconectado` y crea una alerta de `tipo: "dispositivo_desconectado"`
+(`ALERT_TYPES.DEVICE_DISCONNECTED`). Al crearse, `notificarAlerta` envía el
+correo, igual que con las alertas de umbral. Comparte colección y ciclo de vida
+(`activa` → `reconocida` → `resuelta`) con ellas, pero sus campos son otros:
+
+| Campo           | Tipo        | Descripción                                                                |
+| --------------- | ----------- | ----------------------------------------------------------------------------- |
+| `incubadoraId`  | `string`    | Incubadora del dispositivo (la toma del tópico MQTT o de `dispositivos/`).    |
+| `dispositivoId` | `string`    | Dispositivo que dejó de comunicarse.                                          |
+| `tipo`          | `string`    | `dispositivo_desconectado`.                                                   |
+| `estado`        | `string`    | `activa` al crearse; luego `reconocida` o `resuelta`.                         |
+| `titulo`        | `string`    | `Dispositivo desconectado`.                                                   |
+| `mensaje`       | `string`    | `El dispositivo {dispositivoId} dejó de enviar señales hace más de {timeout} segundos.` |
+| `ultimaSenalEn` | `timestamp` | Última señal (latido o medición) que vio el servicio antes de la caída. Si el dispositivo se recuperó al arrancar el servicio, es el momento del arranque. |
+| `creadaEn`      | `timestamp` | Fecha de creación de la alerta (server timestamp).                            |
+| `resueltaEn`    | `timestamp` | Solo existe si `estado` es `resuelta`.                                        |
+| `resueltaPor`   | `string`    | `sistema`. Solo existe si `estado` es `resuelta`.                             |
+
+No tiene `variable`, `valor`, `limite`, `medidoEn` ni `valorResolucion`. Sin
+`variable`, la consulta de alertas abiertas de `evaluarUmbrales` (por
+incubadora y variable) nunca la encuentra, así que la resolución por umbrales no
+la afecta.
+
+- **Deduplicación.** No se crea otra mientras el dispositivo tenga una de este
+  tipo abierta (`activa` o `reconocida`).
+- **Resolución.** La resuelve el propio Servicio de Integración IoT cuando el
+  dispositivo lleva conectado de forma estable (60 segundos por defecto,
+  `LATIDO_ESTABILIDAD_SEGUNDOS`), no en cuanto vuelve a dar señales: así un
+  dispositivo con conexión intermitente no abre y cierra alertas (ni envía
+  correos) en cada corte. Ver `docs/contrato-mqtt.md`.
 
 ## `ventiladores/{ventiladorId}` (Sprint 4)
 

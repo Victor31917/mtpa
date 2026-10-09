@@ -1074,14 +1074,15 @@ exports.procesarMedicion = functions.https.onRequest(async (req, res) => {
   });
 });
 
-// Textos legibles de los tipos de alerta de umbrales. Deben coincidir con
-// ALERT_TYPES de frontend/src/utils/constants.js (temperatura/humedad,
-// alta/baja).
+// Textos legibles de los tipos de alerta. Deben coincidir con ALERT_TYPES
+// de frontend/src/utils/constants.js (temperatura/humedad, alta/baja, y la
+// desconexión de dispositivos).
 const TIPOS_ALERTA_LEGIBLES = {
   temperatura_alta: "temperatura alta",
   temperatura_baja: "temperatura baja",
   humedad_alta: "humedad alta",
   humedad_baja: "humedad baja",
+  dispositivo_desconectado: "dispositivo desconectado",
 };
 
 /**

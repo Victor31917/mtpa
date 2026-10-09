@@ -96,8 +96,9 @@ const ORDEN_MAX_ANTIGUEDAD_MS =
 /*
  * Un dispositivo sin latidos ni mediciones durante más de
  * LATIDO_TIMEOUT_SEGUNDOS se marca "desconectado" en Firestore
- * (ver lib/estado-conexion.js y docs/contrato-mqtt.md). Los valores
- * inválidos se reemplazan por los valores por defecto del módulo.
+ * (ver lib/estado-conexion.js y docs/contrato-mqtt.md) y se crea una
+ * alerta de desconexión. Los valores inválidos se reemplazan por los
+ * valores por defecto del módulo.
  */
 const rastreadorConexion = crearRastreadorConexion({
   db,
@@ -114,8 +115,13 @@ const rastreadorConexion = crearRastreadorConexion({
       process.env.LATIDO_REFRESCO_SEGUNDOS,
       10
     ),
+    estabilidadSegundos: Number.parseInt(
+      process.env.LATIDO_ESTABILIDAD_SEGUNDOS,
+      10
+    ),
   },
   FieldValue: admin.firestore.FieldValue,
+  Timestamp: admin.firestore.Timestamp,
 });
 
 // =========================================================
@@ -488,7 +494,8 @@ async function manejarMensajeProduccion(
 
     await rastreadorConexion.registrarSenalDeVida(
       contextoLatido.dispositivoId,
-      "latido"
+      "latido",
+      { incubadoraId: contextoLatido.incubadoraId }
     );
 
     return;
@@ -520,7 +527,8 @@ async function manejarMensajeProduccion(
   // No se espera: no debe demorar el envío a procesarMedicion.
   rastreadorConexion.registrarSenalDeVida(
     contexto.dispositivoId,
-    "medicion"
+    "medicion",
+    { incubadoraId: contexto.incubadoraId }
   );
 
   // Una petición por variable; si una falla, las demás se envían igual.
