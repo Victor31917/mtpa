@@ -22,6 +22,7 @@ const path = require("path");
 const admin = require("firebase-admin");
 const { cargarVariablesDeEntorno } = require("./lib/env");
 const { conectarCliente } = require("./lib/mqtt-client");
+const { crearRastreadorConexion } = require("./lib/estado-conexion");
 
 cargarVariablesDeEntorno(path.join(__dirname, ".env"));
 
@@ -89,6 +90,35 @@ const ORDEN_MAX_ANTIGUEDAD_MS =
     : 60) * 1000;
 
 // =========================================================
+// Detección de dispositivos desconectados
+// =========================================================
+
+/*
+ * Un dispositivo sin latidos ni mediciones durante más de
+ * LATIDO_TIMEOUT_SEGUNDOS se marca "desconectado" en Firestore
+ * (ver lib/estado-conexion.js y docs/contrato-mqtt.md). Los valores
+ * inválidos se reemplazan por los valores por defecto del módulo.
+ */
+const rastreadorConexion = crearRastreadorConexion({
+  db,
+  config: {
+    timeoutSegundos: Number.parseInt(
+      process.env.LATIDO_TIMEOUT_SEGUNDOS,
+      10
+    ),
+    revisionSegundos: Number.parseInt(
+      process.env.LATIDO_REVISION_SEGUNDOS,
+      10
+    ),
+    refrescoSegundos: Number.parseInt(
+      process.env.LATIDO_REFRESCO_SEGUNDOS,
+      10
+    ),
+  },
+  FieldValue: admin.firestore.FieldValue,
+});
+
+// =========================================================
 // Tópicos MQTT
 // =========================================================
 
@@ -107,6 +137,10 @@ const TOPICO_LATIDO =
 
 const TOPICO_MEDICION_RE = new RegExp(
   `^${escapeRegExp(MQTT_TOPIC_PREFIX)}/([^/]+)/sensores/([^/]+)/medicion$`
+);
+
+const TOPICO_LATIDO_RE = new RegExp(
+  `^${escapeRegExp(MQTT_TOPIC_PREFIX)}/([^/]+)/dispositivos/([^/]+)/latido$`
 );
 
 /*
@@ -147,6 +181,29 @@ function obtenerContextoDelTopico(topico) {
   }
 
   const match = topico.match(TOPICO_MEDICION_RE);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    incubadoraId: match[1],
+    dispositivoId: match[2],
+  };
+}
+
+/**
+ * Obtiene la incubadora y el dispositivo desde un tópico de latido.
+ *
+ * @param {string} topico
+ * @returns {{incubadoraId: string, dispositivoId: string}|null}
+ */
+function obtenerContextoDelLatido(topico) {
+  if (typeof topico !== "string") {
+    return null;
+  }
+
+  const match = topico.match(TOPICO_LATIDO_RE);
 
   if (!match) {
     return null;
@@ -392,8 +449,10 @@ async function invocarProcesarMedicion(medicion) {
  * Procesa los mensajes MQTT recibidos.
  *
  * Solo las mediciones son enviadas a procesarMedicion.
- * Los mensajes de estado de ventiladores y latidos continúan
- * llegando al handler, pero no son enviados a dicha función.
+ * Los mensajes de estado de ventiladores continúan llegando al
+ * handler, pero no son enviados a dicha función. Los latidos y las
+ * mediciones válidas se registran además como señal de vida del
+ * dispositivo (ver lib/estado-conexion.js).
  *
  * @param {string} topico
  * @param {Object} payload
@@ -403,6 +462,38 @@ async function manejarMensajeProduccion(
   topico,
   payload
 ) {
+  const contextoLatido =
+    obtenerContextoDelLatido(topico);
+
+  if (contextoLatido) {
+    // Si el payload declara otro origen, el latido no es confiable.
+    if (
+      payload &&
+      typeof payload === "object" &&
+      ((payload.dispositivoId !== undefined &&
+        payload.dispositivoId !==
+          contextoLatido.dispositivoId) ||
+        (payload.incubadoraId !== undefined &&
+          payload.incubadoraId !==
+            contextoLatido.incubadoraId))
+    ) {
+      console.error(
+        `[iot-integration-service] Latido rechazado ` +
+          `("${topico}"): el origen del payload no coincide ` +
+          "con el del tópico."
+      );
+
+      return;
+    }
+
+    await rastreadorConexion.registrarSenalDeVida(
+      contextoLatido.dispositivoId,
+      "latido"
+    );
+
+    return;
+  }
+
   const contexto =
     obtenerContextoDelTopico(topico);
 
@@ -424,6 +515,13 @@ async function manejarMensajeProduccion(
 
     return;
   }
+
+  // Una medición válida también es señal de vida del dispositivo.
+  // No se espera: no debe demorar el envío a procesarMedicion.
+  rastreadorConexion.registrarSenalDeVida(
+    contexto.dispositivoId,
+    "medicion"
+  );
 
   // Una petición por variable; si una falla, las demás se envían igual.
   for (const medicion of validacion.mediciones) {
@@ -1024,6 +1122,9 @@ if (require.main === module) {
 
   const unsubscribeOrdenes = escucharOrdenesPendientes(cliente);
 
+  // Detección de dispositivos desconectados (no rechaza).
+  rastreadorConexion.iniciar();
+
   function cerrar() {
     console.log(
       "[iot-integration-service] " +
@@ -1032,6 +1133,9 @@ if (require.main === module) {
 
     // Detener el listener de Firestore.
     unsubscribeOrdenes();
+
+    // Detener el watchdog de conexión.
+    rastreadorConexion.detener();
 
     cliente.end(
       false,
