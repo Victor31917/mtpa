@@ -65,11 +65,42 @@ dispositivo. Para no agotar la cuota de Firestore, el servicio no escribe en
 cada mensaje: solo al marcar `"conectado"`, al refrescar
 `ultimaComunicacionEn` (como máximo una vez por minuto) y al marcar
 `"desconectado"`. Los umbrales se ajustan con `LATIDO_TIMEOUT_SEGUNDOS`,
-`LATIDO_REVISION_SEGUNDOS` y `LATIDO_REFRESCO_SEGUNDOS` (ver
+`LATIDO_REVISION_SEGUNDOS`, `LATIDO_REFRESCO_SEGUNDOS` y
+`LATIDO_ESTABILIDAD_SEGUNDOS` (ver
 `iot-integration-service/.env.example`). La detección corre dentro del Servicio
 de Integración IoT, por lo que debe estar en ejecución para que funcione: si el
 servicio está caído, nadie marca a los dispositivos como desconectados. Los
 dispositivos que no existen en `dispositivos/` se ignoran (no se crean).
+
+### Alerta de desconexión
+
+Cuando el servicio marca a un dispositivo como `"desconectado"` también crea
+una alerta en `alertas` (`tipo: "dispositivo_desconectado"`, estado `activa`;
+ver `docs/modelo-datos.md`), para que alguien se entere de que el dispositivo
+dejó de comunicarse. Al crearse, la Cloud Function `notificarAlerta` envía el
+correo a los administradores y la interfaz muestra la alerta como cualquier
+otra.
+
+- **Sin duplicados.** Antes de crearla, el servicio comprueba si el dispositivo
+  ya tiene una alerta de desconexión abierta (`activa` o `reconocida`); si la
+  tiene, no crea otra. Si no conoce la incubadora del dispositivo (la toma del
+  tópico de sus latidos y mediciones, o del documento `dispositivos/` al
+  arrancar), no crea la alerta y lo registra una vez en el log.
+- **Resolución por reconexión estable.** Cuando el dispositivo vuelve a
+  comunicarse se marca `"conectado"` de inmediato, pero la alerta no se
+  resuelve hasta que lleva **60 segundos** conectado sin cortes
+  (`LATIDO_ESTABILIDAD_SEGUNDOS`). La comprobación la hace el watchdog, no cada
+  latido, y marca la alerta como `resuelta` (`resueltaPor: "sistema"`). Así, un
+  dispositivo con conexión intermitente mantiene una sola alerta abierta y no
+  genera un correo por cada corte. Si vuelve a caerse antes de ese tiempo, la
+  alerta sigue abierta y no se crea otra.
+- **Reinicio del servicio.** Las alertas que quedaron abiertas mientras el
+  servicio estaba apagado se resuelven del mismo modo cuando el dispositivo
+  lleva 60 segundos estable tras el arranque.
+- **Limitación.** Como la detección corre dentro del servicio, si este está
+  caído no se detecta ninguna desconexión ni se crea ninguna alerta. Si falla
+  la escritura de la alerta, solo se registra en el log: el estado
+  `"desconectado"` ya escrito se mantiene y la alerta no se reintenta.
 
 ## Notas
 
