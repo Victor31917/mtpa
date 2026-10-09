@@ -18,6 +18,16 @@
 //     LATIDO_REFRESCO_SEGUNDOS mientras sigue conectado,
 //   - al pasar a "desconectado" (una sola vez por caída).
 //
+// Al marcar "desconectado" se crea además una alerta
+// "dispositivo_desconectado" en "alertas" (la Cloud Function
+// notificarAlerta envía el correo al crearse). No se crea otra
+// mientras haya una abierta del mismo dispositivo. La alerta se
+// resuelve cuando el dispositivo lleva conectado de forma estable
+// LATIDO_ESTABILIDAD_SEGUNDOS (60 s por defecto): así un dispositivo
+// con conexión intermitente no abre y cierra alertas (y correos) en
+// cada intermitencia. Los latidos NO consultan Firestore: la revisión
+// la hace el watchdog.
+//
 // Limitación: la detección corre dentro del Servicio de
 // Integración. Si el servicio está caído nadie marca dispositivos
 // como desconectados.
@@ -27,15 +37,22 @@
 const PREFIJO_LOG = "[iot-integration-service]";
 
 const COLECCION_DISPOSITIVOS = "dispositivos";
+const COLECCION_ALERTAS = "alertas";
 
 const CONECTADO = "conectado";
 const DESCONECTADO = "desconectado";
 const DESCONOCIDO = "desconocido";
 
+// Debe coincidir con ALERT_TYPES.DEVICE_DISCONNECTED y ALERT_STATUS de
+// frontend/src/utils/constants.js.
+const TIPO_ALERTA_DESCONEXION = "dispositivo_desconectado";
+const ESTADOS_ALERTA_ABIERTA = ["activa", "reconocida"];
+
 const VALORES_POR_DEFECTO = {
   timeoutSegundos: 30,
   revisionSegundos: 5,
   refrescoSegundos: 60,
+  estabilidadSegundos: 60,
 };
 
 // Tiempo que se recuerda un dispositivo que no existe en Firestore
@@ -99,12 +116,16 @@ function esNoEncontrado(error) {
  * @param {number} [opciones.config.timeoutSegundos]
  * @param {number} [opciones.config.revisionSegundos]
  * @param {number} [opciones.config.refrescoSegundos]
+ * @param {number} [opciones.config.estabilidadSegundos] Tiempo conectado
+ *   sin cortes tras el cual se resuelve la alerta de desconexión.
  * @param {Object} [opciones.logger] Con log, warn y error.
  * @param {Object} [opciones.FieldValue] FieldValue de Firestore Admin.
+ * @param {Object} [opciones.Timestamp] Timestamp de Firestore Admin
+ *   (si no se inyecta, se carga de firebase-admin al crear una alerta).
  * @returns {{
  *   iniciar: () => Promise<void>,
  *   detener: () => void,
- *   registrarSenalDeVida: (dispositivoId: string, origen?: string) => Promise<void>,
+ *   registrarSenalDeVida: (dispositivoId: string, origen?: string, contexto?: {incubadoraId?: string}) => Promise<void>,
  *   revisarTimeouts: () => Promise<void>,
  *   cargarEstadoInicial: () => Promise<void>
  * }}
@@ -115,6 +136,7 @@ function crearRastreadorConexion({
   config = {},
   logger = console,
   FieldValue = require("firebase-admin").firestore.FieldValue,
+  Timestamp = null,
 }) {
   const timeoutMs =
     segundosValidos(config.timeoutSegundos, VALORES_POR_DEFECTO.timeoutSegundos) *
@@ -128,9 +150,20 @@ function crearRastreadorConexion({
     segundosValidos(config.refrescoSegundos, VALORES_POR_DEFECTO.refrescoSegundos) *
     1000;
 
-  // dispositivoId -> { ultimaSenal, estado, ultimoRefresco, cola }
+  const estabilidadMs =
+    segundosValidos(
+      config.estabilidadSegundos,
+      VALORES_POR_DEFECTO.estabilidadSegundos
+    ) * 1000;
+
+  // dispositivoId -> { ultimaSenal, estado, ultimoRefresco, cola,
+  //   incubadoraId, conectadoDesde, revisarAlerta, ... }
   // "cola" encadena las escrituras del dispositivo para que lleguen
   // a Firestore en el mismo orden en que se decidieron.
+  // "revisarAlerta" indica que puede haber una alerta de desconexión
+  // abierta por resolver (arranca en true y vuelve a true al
+  // desconectarse); "conectadoDesde" es el momento en que pasó a
+  // "conectado", para medir la estabilidad.
   const dispositivos = new Map();
 
   // dispositivoId -> ms hasta el que se ignora (no existe en Firestore).
@@ -143,6 +176,155 @@ function crearRastreadorConexion({
     entrada.cola = entrada.cola.then(tarea, tarea);
 
     return entrada.cola;
+  }
+
+  function crearEntrada({ ultimaSenal, estado, ultimoRefresco, incubadoraId }) {
+    return {
+      ultimaSenal,
+      estado,
+      ultimoRefresco,
+      cola: Promise.resolve(),
+      incubadoraId: idIncubadoraValido(incubadoraId) ? incubadoraId : null,
+      conectadoDesde: ultimaSenal,
+      revisarAlerta: true,
+      resolviendo: false,
+      avisoSinIncubadora: false,
+      falloResolucionLogueado: false,
+    };
+  }
+
+  function idIncubadoraValido(incubadoraId) {
+    return typeof incubadoraId === "string" && incubadoraId.length > 0;
+  }
+
+  function obtenerTimestamp() {
+    return Timestamp || require("firebase-admin").firestore.Timestamp;
+  }
+
+  /**
+   * Alertas abiertas de desconexión de un dispositivo. Solo usa
+   * filtros de igualdad (no requiere índice compuesto).
+   */
+  function consultarAlertasAbiertas(dispositivoId, limite) {
+    let consulta = db
+      .collection(COLECCION_ALERTAS)
+      .where("dispositivoId", "==", dispositivoId)
+      .where("tipo", "==", TIPO_ALERTA_DESCONEXION)
+      .where("estado", "in", ESTADOS_ALERTA_ABIERTA);
+
+    if (limite) {
+      consulta = consulta.limit(limite);
+    }
+
+    return consulta.get();
+  }
+
+  /**
+   * Crea la alerta de desconexión si el dispositivo no tiene ya una
+   * abierta. Nunca lanza: un fallo se registra y no afecta al estado
+   * de conexión ya escrito.
+   *
+   * @param {string} dispositivoId
+   * @param {Object} entrada
+   * @param {number} ultimaSenal ms de la última señal vista.
+   * @returns {Promise<void>}
+   */
+  async function crearAlertaDesconexion(dispositivoId, entrada, ultimaSenal) {
+    try {
+      if (!entrada.incubadoraId) {
+        if (!entrada.avisoSinIncubadora) {
+          entrada.avisoSinIncubadora = true;
+
+          logger.warn(
+            `${PREFIJO_LOG} No se crea la alerta de desconexión de ` +
+              `"${dispositivoId}": se desconoce su incubadora.`
+          );
+        }
+
+        return;
+      }
+
+      const abiertas = await consultarAlertasAbiertas(dispositivoId, 1);
+
+      if (!abiertas.empty) {
+        return;
+      }
+
+      await db.collection(COLECCION_ALERTAS).add({
+        incubadoraId: entrada.incubadoraId,
+        dispositivoId,
+        tipo: TIPO_ALERTA_DESCONEXION,
+        estado: "activa",
+        titulo: "Dispositivo desconectado",
+        mensaje:
+          `El dispositivo ${dispositivoId} dejó de enviar señales ` +
+          `hace más de ${timeoutMs / 1000} segundos.`,
+        ultimaSenalEn: obtenerTimestamp().fromMillis(ultimaSenal),
+        creadaEn: FieldValue.serverTimestamp(),
+      });
+
+      logger.log(
+        `${PREFIJO_LOG} Alerta de desconexión creada para ` +
+          `"${dispositivoId}".`
+      );
+    } catch (error) {
+      logger.error(
+        `${PREFIJO_LOG} No se pudo crear la alerta de desconexión de ` +
+          `"${dispositivoId}":`,
+        error && error.message ? error.message : error
+      );
+    }
+  }
+
+  /**
+   * Resuelve las alertas de desconexión abiertas de un dispositivo
+   * que ya lleva conectado de forma estable. Nunca lanza.
+   *
+   * @param {string} dispositivoId
+   * @param {Object} entrada
+   * @returns {Promise<boolean>} true si terminó (con o sin alertas).
+   */
+  async function resolverAlertasDesconexion(dispositivoId, entrada) {
+    try {
+      const abiertas = await consultarAlertasAbiertas(dispositivoId);
+
+      if (!abiertas.empty) {
+        const batch = db.batch();
+
+        abiertas.forEach((doc) => {
+          batch.update(doc.ref, {
+            estado: "resuelta",
+            resueltaEn: FieldValue.serverTimestamp(),
+            resueltaPor: "sistema",
+          });
+        });
+
+        await batch.commit();
+
+        logger.log(
+          `${PREFIJO_LOG} Alerta de desconexión de "${dispositivoId}" ` +
+            "resuelta (el dispositivo volvió a comunicarse)."
+        );
+      }
+
+      entrada.falloResolucionLogueado = false;
+
+      return true;
+    } catch (error) {
+      // Se reintenta en el siguiente ciclo; se loguea una sola vez
+      // mientras siga fallando para no inundar el log.
+      if (!entrada.falloResolucionLogueado) {
+        entrada.falloResolucionLogueado = true;
+
+        logger.error(
+          `${PREFIJO_LOG} No se pudo resolver la alerta de desconexión ` +
+            `de "${dispositivoId}" (se reintenta):`,
+          error && error.message ? error.message : error
+        );
+      }
+
+      return false;
+    }
   }
 
   /**
@@ -210,9 +392,15 @@ function crearRastreadorConexion({
    *
    * @param {string} dispositivoId
    * @param {string} [origen] "latido" o "medicion" (solo para logs).
+   * @param {{incubadoraId?: string}} [contexto] Incubadora del tópico:
+   *   la alerta de desconexión la necesita.
    * @returns {Promise<void>}
    */
-  async function registrarSenalDeVida(dispositivoId, origen = "señal") {
+  async function registrarSenalDeVida(
+    dispositivoId,
+    origen = "señal",
+    contexto = {}
+  ) {
     try {
       if (!activo || !esIdValido(dispositivoId) || estaIgnorado(dispositivoId)) {
         return;
@@ -222,17 +410,20 @@ function crearRastreadorConexion({
       let entrada = dispositivos.get(dispositivoId);
 
       if (!entrada) {
-        entrada = {
+        entrada = crearEntrada({
           ultimaSenal: t,
           estado: DESCONOCIDO,
           ultimoRefresco: Number.NEGATIVE_INFINITY,
-          cola: Promise.resolve(),
-        };
+        });
 
         dispositivos.set(dispositivoId, entrada);
       }
 
       entrada.ultimaSenal = t;
+
+      if (contexto && idIncubadoraValido(contexto.incubadoraId)) {
+        entrada.incubadoraId = contexto.incubadoraId;
+      }
 
       if (entrada.estado === CONECTADO) {
         if (t - entrada.ultimoRefresco < refrescoMs) {
@@ -254,6 +445,7 @@ function crearRastreadorConexion({
 
       entrada.estado = CONECTADO;
       entrada.ultimoRefresco = t;
+      entrada.conectadoDesde = t;
 
       const resultado = await encolar(entrada, () =>
         actualizar(dispositivoId, {
@@ -301,19 +493,68 @@ function crearRastreadorConexion({
       }
 
       for (const [dispositivoId, entrada] of dispositivos) {
-        if (entrada.estado !== CONECTADO || t - entrada.ultimaSenal <= timeoutMs) {
+        if (entrada.estado !== CONECTADO) {
+          continue;
+        }
+
+        if (t - entrada.ultimaSenal <= timeoutMs) {
+          // Sigue vivo: si lleva conectado de forma estable, se
+          // resuelve la alerta de desconexión que pueda haber abierta.
+          if (
+            entrada.revisarAlerta &&
+            !entrada.resolviendo &&
+            t - entrada.conectadoDesde >= estabilidadMs
+          ) {
+            entrada.resolviendo = true;
+
+            pendientes.push(
+              encolar(entrada, async () => {
+                try {
+                  // Puede haberse caído mientras esperaba en la cola.
+                  if (
+                    entrada.estado !== CONECTADO ||
+                    ahora() - entrada.conectadoDesde < estabilidadMs
+                  ) {
+                    return;
+                  }
+
+                  // Si se desconecta durante la consulta, revisarAlerta
+                  // vuelve a true y no se pisa.
+                  entrada.revisarAlerta = false;
+
+                  if (!(await resolverAlertasDesconexion(dispositivoId, entrada))) {
+                    entrada.revisarAlerta = true;
+                  }
+                } finally {
+                  entrada.resolviendo = false;
+                }
+              })
+            );
+          }
+
           continue;
         }
 
         // Se cambia el estado antes de escribir para que los
         // siguientes ciclos no repitan la escritura.
         entrada.estado = DESCONECTADO;
+        entrada.revisarAlerta = true;
+
+        const ultimaSenal = entrada.ultimaSenal;
 
         pendientes.push(
-          encolar(entrada, () =>
+          encolar(entrada, async () => {
             // ultimaComunicacionEn no se toca: es la última vez visto.
-            actualizar(dispositivoId, { estadoConexion: DESCONECTADO })
-          ).then((resultado) => {
+            const resultado = await actualizar(dispositivoId, {
+              estadoConexion: DESCONECTADO,
+            });
+
+            if (resultado === "ok") {
+              await crearAlertaDesconexion(dispositivoId, entrada, ultimaSenal);
+            }
+
+            return resultado;
+          }).then((resultado) => {
             if (resultado === "ok") {
               logger.warn(
                 `${PREFIJO_LOG} Dispositivo "${dispositivoId}" ` +
@@ -363,12 +604,17 @@ function crearRastreadorConexion({
           return;
         }
 
-        dispositivos.set(doc.id, {
-          ultimaSenal: t,
-          estado: CONECTADO,
-          ultimoRefresco: t,
-          cola: Promise.resolve(),
-        });
+        const datos = typeof doc.data === "function" ? doc.data() : null;
+
+        dispositivos.set(
+          doc.id,
+          crearEntrada({
+            ultimaSenal: t,
+            estado: CONECTADO,
+            ultimoRefresco: t,
+            incubadoraId: datos ? datos.incubadoraId : null,
+          })
+        );
       });
     } catch (error) {
       logger.error(
