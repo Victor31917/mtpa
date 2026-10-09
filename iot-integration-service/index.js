@@ -9,12 +9,15 @@
 // "procesarMedicion" mediante HTTPS.
 //
 // La conexión MQTT y las suscripciones permanecen dentro de
-// "conectar()". El handler de producción solo procesa tópicos
-// de mediciones.
+// "conectar()". El handler de producción procesa los tópicos de
+// mediciones, de latidos y de estado de ventiladores.
 //
 // Además escucha en Firestore las órdenes pendientes de
 // "ordenes_ventilador" y publica el comando MQTT
-// correspondiente (ver "escucharOrdenesPendientes()").
+// correspondiente (ver "escucharOrdenesPendientes()"). Cuando el
+// ventilador reporta su estado, cierra la orden como "ejecutada";
+// las que nadie confirma las marca "fallida" un barrido periódico
+// (ver "iniciarBarridoOrdenes()").
 //
 // =========================================================
 
@@ -89,6 +92,24 @@ const ORDEN_MAX_ANTIGUEDAD_MS =
     ? ORDEN_MAX_ANTIGUEDAD_SEGUNDOS_ENTORNO
     : 60) * 1000;
 
+/*
+ * Una orden "enviada" que el dispositivo no confirma pasado este
+ * tiempo se marca "fallida" (ver barrerOrdenesEnviadas). Se cuenta
+ * desde "enviadaEn". Un valor inválido se reemplaza por 30 s.
+ */
+const ORDEN_CONFIRMACION_TIMEOUT_SEGUNDOS_ENTORNO = Number.parseInt(
+  process.env.ORDEN_CONFIRMACION_TIMEOUT_SEGUNDOS,
+  10
+);
+
+const ORDEN_CONFIRMACION_TIMEOUT_MS =
+  (ORDEN_CONFIRMACION_TIMEOUT_SEGUNDOS_ENTORNO > 0
+    ? ORDEN_CONFIRMACION_TIMEOUT_SEGUNDOS_ENTORNO
+    : 30) * 1000;
+
+// Cada cuánto se revisan las órdenes "enviada" sin confirmar.
+const BARRIDO_ORDENES_INTERVALO_MS = 10 * 1000;
+
 // =========================================================
 // Detección de dispositivos desconectados
 // =========================================================
@@ -147,6 +168,10 @@ const TOPICO_MEDICION_RE = new RegExp(
 
 const TOPICO_LATIDO_RE = new RegExp(
   `^${escapeRegExp(MQTT_TOPIC_PREFIX)}/([^/]+)/dispositivos/([^/]+)/latido$`
+);
+
+const TOPICO_ESTADO_RE = new RegExp(
+  `^${escapeRegExp(MQTT_TOPIC_PREFIX)}/([^/]+)/ventiladores/([^/]+)/estado$`
 );
 
 /*
@@ -210,6 +235,30 @@ function obtenerContextoDelLatido(topico) {
   }
 
   const match = topico.match(TOPICO_LATIDO_RE);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    incubadoraId: match[1],
+    dispositivoId: match[2],
+  };
+}
+
+/**
+ * Obtiene la incubadora y el ventilador desde un tópico de estado.
+ * El id del ventilador es el dispositivoId del tópico.
+ *
+ * @param {string} topico
+ * @returns {{incubadoraId: string, dispositivoId: string}|null}
+ */
+function obtenerContextoDelEstado(topico) {
+  if (typeof topico !== "string") {
+    return null;
+  }
+
+  const match = topico.match(TOPICO_ESTADO_RE);
 
   if (!match) {
     return null;
@@ -455,10 +504,10 @@ async function invocarProcesarMedicion(medicion) {
  * Procesa los mensajes MQTT recibidos.
  *
  * Solo las mediciones son enviadas a procesarMedicion.
- * Los mensajes de estado de ventiladores continúan llegando al
- * handler, pero no son enviados a dicha función. Los latidos y las
- * mediciones válidas se registran además como señal de vida del
- * dispositivo (ver lib/estado-conexion.js).
+ * Los mensajes de estado de ventiladores se procesan aparte (ver
+ * manejarEstadoVentilador) y tampoco van a dicha función. Los latidos
+ * y las mediciones válidas se registran además como señal de vida
+ * del dispositivo (ver lib/estado-conexion.js).
  *
  * @param {string} topico
  * @param {Object} payload
@@ -497,6 +546,24 @@ async function manejarMensajeProduccion(
       "latido",
       { incubadoraId: contextoLatido.incubadoraId }
     );
+
+    return;
+  }
+
+  const contextoEstado =
+    obtenerContextoDelEstado(topico);
+
+  if (contextoEstado) {
+    // Un fallo aquí no debe afectar a las mediciones ni a los latidos.
+    try {
+      await manejarEstadoVentilador(contextoEstado, payload);
+    } catch (error) {
+      console.error(
+        `[iot-integration-service] Error al procesar el estado ` +
+          `del ventilador ("${topico}"):`,
+        error
+      );
+    }
 
     return;
   }
@@ -782,9 +849,25 @@ const ESTADO_ORDEN = {
   ENVIADA: "enviada",
   FALLIDA: "fallida",
   EXPIRADA: "expirada",
+  EJECUTADA: "ejecutada",
 };
 
 const ACCIONES_VALIDAS = ["encender", "apagar"];
+
+// Valores de FAN_STATUS (frontend/src/utils/constants.js).
+const ESTADO_VENTILADOR = {
+  ENCENDIDO: "encendido",
+  APAGADO: "apagado",
+};
+
+// Estado en que debe quedar el ventilador para dar por cumplida cada acción.
+const ESTADO_ESPERADO_POR_ACCION = {
+  encender: ESTADO_VENTILADOR.ENCENDIDO,
+  apagar: ESTADO_VENTILADOR.APAGADO,
+};
+
+// Cuántas órdenes recientes del ventilador se miran para correlacionar.
+const ORDENES_A_CORRELACIONAR = 10;
 
 // Un id que se usa como segmento de tópico no puede traer
 // separadores ni comodines MQTT.
@@ -886,10 +969,11 @@ async function marcarOrdenFallida(ordenRef, motivo) {
  * @param {FirebaseFirestore.DocumentReference} ordenRef
  * @param {string} desde Estado esperado.
  * @param {string} hasta Estado nuevo.
+ * @param {Object} [campos] Campos adicionales a escribir.
  * @returns {Promise<Object|null>} Datos de la orden si se hizo el
  * cambio, o null si ya no estaba en el estado esperado.
  */
-function transicionarOrden(ordenRef, desde, hasta) {
+function transicionarOrden(ordenRef, desde, hasta, campos = {}) {
   return db.runTransaction(async (transaccion) => {
     const snapshot = await transaccion.get(ordenRef);
 
@@ -900,10 +984,369 @@ function transicionarOrden(ordenRef, desde, hasta) {
     transaccion.update(ordenRef, {
       estado: hasta,
       actualizadaEn: admin.firestore.FieldValue.serverTimestamp(),
+      ...campos,
     });
 
     return snapshot.data();
   });
+}
+
+// =========================================================
+// CONFIRMACIÓN DEL ESTADO DEL VENTILADOR
+// =========================================================
+//
+// Cuando el ventilador publica su estado en ".../estado" (ver
+// docs/contrato-mqtt.md), el servicio:
+//
+//   1. Actualiza "ventiladores/{dispositivoId}" (estadoActual).
+//   2. Si hay una orden "enviada" cuya acción coincide con ese
+//      estado, la cierra como "ejecutada".
+//
+// El mensaje no trae "ordenId": se correlaciona con la orden
+// "enviada" más reciente del ventilador. Las órdenes "enviada" que
+// nadie confirma las marca "fallida" el barrido periódico
+// (barrerOrdenesEnviadas), que también cubre el caso de un
+// reinicio del servicio.
+//
+// =========================================================
+
+// Un id que se usa como id de documento: sin separadores ni
+// comodines, y sin los valores que Firestore reserva.
+function esIdDeDocumentoValido(id) {
+  return (
+    typeof id === "string" &&
+    id.length <= 128 &&
+    SEGMENTO_TOPICO_RE.test(id) &&
+    id !== "." &&
+    id !== ".." &&
+    !/^__.*__$/.test(id)
+  );
+}
+
+/**
+ * Valida el payload de estado de un ventilador y lo traduce al
+ * vocabulario de FAN_STATUS.
+ *
+ * @param {{incubadoraId: string, dispositivoId: string}} contexto
+ * @param {Object} payload
+ * @returns {{valido: boolean, razon?: string, estado?: string}}
+ */
+function validarEstadoVentilador(contexto, payload) {
+  if (
+    !esIdDeDocumentoValido(contexto.incubadoraId) ||
+    !esIdDeDocumentoValido(contexto.dispositivoId)
+  ) {
+    return {
+      valido: false,
+      razon:
+        "La incubadora o el ventilador del tópico no son ids válidos.",
+    };
+  }
+
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return {
+      valido: false,
+      razon: "El payload debe ser un objeto JSON.",
+    };
+  }
+
+  // Si el payload declara otro origen, el estado no es confiable.
+  if (
+    (payload.incubadoraId !== undefined &&
+      payload.incubadoraId !== contexto.incubadoraId) ||
+    (payload.dispositivoId !== undefined &&
+      payload.dispositivoId !== contexto.dispositivoId)
+  ) {
+    return {
+      valido: false,
+      razon:
+        "El origen del payload no coincide con el del tópico.",
+    };
+  }
+
+  if (typeof payload.encendido !== "boolean") {
+    return {
+      valido: false,
+      razon: "encendido debe ser booleano.",
+    };
+  }
+
+  return {
+    valido: true,
+    estado: payload.encendido
+      ? ESTADO_VENTILADOR.ENCENDIDO
+      : ESTADO_VENTILADOR.APAGADO,
+  };
+}
+
+/**
+ * Procesa el estado que reporta un ventilador: actualiza
+ * "ventiladores/{dispositivoId}" y cierra la orden en curso si el
+ * estado reportado es el que pedía.
+ *
+ * Si el ventilador no existe en Firestore, lo registra y no lo crea.
+ *
+ * @param {{incubadoraId: string, dispositivoId: string}} contexto
+ * @param {Object} payload
+ * @returns {Promise<void>}
+ */
+async function manejarEstadoVentilador(contexto, payload) {
+  const { incubadoraId, dispositivoId } = contexto;
+
+  const validacion = validarEstadoVentilador(contexto, payload);
+
+  if (!validacion.valido) {
+    console.error(
+      `[iot-integration-service] Estado de ventilador rechazado ` +
+        `(${incubadoraId}/${dispositivoId}): ${validacion.razon}`
+    );
+
+    return;
+  }
+
+  const estado = validacion.estado;
+  const ventiladorRef = db
+    .collection("ventiladores")
+    .doc(dispositivoId);
+
+  // El documento lo crea crearDispositivo: aquí solo se actualiza.
+  const ventilador = await ventiladorRef.get();
+
+  if (!ventilador.exists) {
+    console.warn(
+      `[iot-integration-service] Estado ignorado: el ventilador ` +
+        `${dispositivoId} no existe en "ventiladores".`
+    );
+
+    return;
+  }
+
+  if (ventilador.data().incubadoraId !== incubadoraId) {
+    console.error(
+      `[iot-integration-service] Estado rechazado: el ventilador ` +
+        `${dispositivoId} no pertenece a la incubadora ` +
+        `"${incubadoraId}" del tópico.`
+    );
+
+    return;
+  }
+
+  await ventiladorRef.update({
+    estadoActual: estado,
+    actualizadoEn: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  console.log(
+    `[iot-integration-service] Ventilador ${dispositivoId} ` +
+      `actualizado a "${estado}".`
+  );
+
+  // Cerrar la orden no puede impedir que el estado ya quede guardado.
+  try {
+    await cerrarOrdenEnCurso(dispositivoId, estado);
+  } catch (error) {
+    console.error(
+      `[iot-integration-service] No se pudo cerrar la orden en ` +
+        `curso del ventilador ${dispositivoId}:`,
+      error
+    );
+  }
+}
+
+/**
+ * Busca la orden "enviada" más reciente del ventilador y, si pedía
+ * el estado reportado, la marca "ejecutada". Si el estado no
+ * coincide, o no hay ninguna "enviada" (reporte espontáneo), no
+ * toca nada.
+ *
+ * Usa el índice existente (ventiladorId + creadaEn desc) y filtra el
+ * estado en memoria.
+ *
+ * @param {string} ventiladorId
+ * @param {string} estado Estado reportado ("encendido" o "apagado").
+ * @returns {Promise<void>}
+ */
+async function cerrarOrdenEnCurso(ventiladorId, estado) {
+  const snapshot = await db
+    .collection("ordenes_ventilador")
+    .where("ventiladorId", "==", ventiladorId)
+    .orderBy("creadaEn", "desc")
+    .limit(ORDENES_A_CORRELACIONAR)
+    .get();
+
+  const ordenDoc = snapshot.docs.find(
+    (doc) => doc.data().estado === ESTADO_ORDEN.ENVIADA
+  );
+
+  if (!ordenDoc) {
+    return;
+  }
+
+  const accion = ordenDoc.data().accionSolicitada;
+
+  if (ESTADO_ESPERADO_POR_ACCION[accion] !== estado) {
+    console.warn(
+      `[iot-integration-service] La orden ${ordenDoc.id} pedía ` +
+        `"${accion}" pero el ventilador reportó "${estado}": ` +
+        "sigue enviada."
+    );
+
+    return;
+  }
+
+  // Con precondición: no pisa una orden que el barrido ya marcó fallida.
+  const orden = await transicionarOrden(
+    ordenDoc.ref,
+    ESTADO_ORDEN.ENVIADA,
+    ESTADO_ORDEN.EJECUTADA,
+    { ejecutadaEn: admin.firestore.FieldValue.serverTimestamp() }
+  );
+
+  if (!orden) {
+    console.warn(
+      `[iot-integration-service] La orden ${ordenDoc.id} ya no ` +
+        "estaba enviada; no se marca ejecutada."
+    );
+
+    return;
+  }
+
+  console.log(
+    `[iot-integration-service] Orden ${ordenDoc.id} ejecutada ` +
+      `(ventilador ${ventiladorId} "${estado}").`
+  );
+}
+
+// =========================================================
+// BARRIDO DE ÓRDENES SIN CONFIRMAR
+// =========================================================
+
+/**
+ * Milisegundos de una marca de tiempo de Firestore, o null.
+ *
+ * @param {*} marca
+ * @returns {number|null}
+ */
+function milisegundosDe(marca) {
+  return marca && typeof marca.toMillis === "function"
+    ? marca.toMillis()
+    : null;
+}
+
+/**
+ * Marca "fallida" cada orden "enviada" que lleva más de
+ * ORDEN_CONFIRMACION_TIMEOUT_MS sin confirmarse. Una sola consulta
+ * por ciclo. Cada orden se cierra con precondición, así que una
+ * confirmación que llegue en el mismo momento gana si fue primera.
+ *
+ * La antigüedad se cuenta desde "enviadaEn"; si falta, desde
+ * "actualizadaEn" y luego "creadaEn". Sin ninguna fecha no se puede
+ * saber su antigüedad y la orden se deja como está.
+ *
+ * @returns {Promise<number>} Cantidad de órdenes marcadas fallidas.
+ */
+async function barrerOrdenesEnviadas() {
+  const snapshot = await db
+    .collection("ordenes_ventilador")
+    .where("estado", "==", ESTADO_ORDEN.ENVIADA)
+    .get();
+
+  const ahora = Date.now();
+  let vencidas = 0;
+
+  for (const doc of snapshot.docs) {
+    const datos = doc.data();
+
+    const desde =
+      milisegundosDe(datos.enviadaEn) ??
+      milisegundosDe(datos.actualizadaEn) ??
+      milisegundosDe(datos.creadaEn);
+
+    if (desde === null || ahora - desde <= ORDEN_CONFIRMACION_TIMEOUT_MS) {
+      continue;
+    }
+
+    const motivo =
+      "El dispositivo no confirmó el estado en " +
+      `${ORDEN_CONFIRMACION_TIMEOUT_MS / 1000} s.`;
+
+    try {
+      const orden = await transicionarOrden(
+        doc.ref,
+        ESTADO_ORDEN.ENVIADA,
+        ESTADO_ORDEN.FALLIDA,
+        { error: motivo }
+      );
+
+      // null: otra confirmación o instancia la cerró primero.
+      if (orden) {
+        vencidas += 1;
+
+        console.error(
+          `[iot-integration-service] Orden ${doc.id} fallida: ` +
+            motivo
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[iot-integration-service] No se pudo marcar la orden ` +
+          `${doc.id} como fallida:`,
+        error
+      );
+    }
+  }
+
+  return vencidas;
+}
+
+/**
+ * Arranca el barrido periódico de órdenes "enviada" sin confirmar
+ * (uno inmediato y luego uno cada BARRIDO_ORDENES_INTERVALO_MS). Un
+ * error en un ciclo se registra y no detiene el servicio.
+ *
+ * @returns {() => void} Función que detiene el barrido.
+ */
+function iniciarBarridoOrdenes() {
+  let barriendo = false;
+
+  const ciclo = async () => {
+    // Si el ciclo anterior sigue en curso, se salta este.
+    if (barriendo) {
+      return;
+    }
+
+    barriendo = true;
+
+    try {
+      await barrerOrdenesEnviadas();
+    } catch (error) {
+      console.error(
+        "[iot-integration-service] Error en el barrido de " +
+          "órdenes enviadas:",
+        error
+      );
+    } finally {
+      barriendo = false;
+    }
+  };
+
+  ciclo();
+
+  const temporizador = setInterval(
+    ciclo,
+    BARRIDO_ORDENES_INTERVALO_MS
+  );
+
+  // No mantiene vivo el proceso por sí solo.
+  if (typeof temporizador.unref === "function") {
+    temporizador.unref();
+  }
+
+  return () => clearInterval(temporizador);
 }
 
 // =========================================================
@@ -1130,6 +1573,9 @@ if (require.main === module) {
 
   const unsubscribeOrdenes = escucharOrdenesPendientes(cliente);
 
+  // Cierra como fallidas las órdenes enviadas que nadie confirmó.
+  const detenerBarridoOrdenes = iniciarBarridoOrdenes();
+
   // Detección de dispositivos desconectados (no rechaza).
   rastreadorConexion.iniciar();
 
@@ -1141,6 +1587,9 @@ if (require.main === module) {
 
     // Detener el listener de Firestore.
     unsubscribeOrdenes();
+
+    // Detener el barrido de órdenes sin confirmar.
+    detenerBarridoOrdenes();
 
     // Detener el watchdog de conexión.
     rastreadorConexion.detener();
@@ -1162,6 +1611,8 @@ if (require.main === module) {
 module.exports = {
   conectar,
   escucharOrdenesPendientes,
+  iniciarBarridoOrdenes,
+  barrerOrdenesEnviadas,
   manejarMensajeProduccion,
   validarMedicion,
   invocarProcesarMedicion,

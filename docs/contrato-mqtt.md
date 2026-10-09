@@ -41,6 +41,88 @@ JSON con esta forma, a partir de una orden de `ordenes_ventilador` (ver
 | `ordenId`      | `string` | Id de la orden en `ordenes_ventilador`; permite correlacionar la confirmación publicada en `.../estado` con la orden. |
 | `solicitadoEn` | `string` | Fecha de creación de la orden (ISO 8601, UTC).                                  |
 
+## Payload del estado del ventilador
+
+El ventilador publica en `mtpa/{incubadoraId}/ventiladores/{dispositivoId}/estado`
+un objeto JSON con esta forma (es lo que publica el simulador):
+
+```json
+{
+  "incubadoraId": "incubadora-1",
+  "dispositivoId": "ventilador-1",
+  "encendido": true,
+  "velocidad": 50,
+  "actualizadoEn": "2026-10-01T15:04:06.000Z"
+}
+```
+
+| Campo           | Tipo      | Descripción                                                                 |
+| --------------- | --------- | ------------------------------------------------------------------------------ |
+| `incubadoraId`  | `string`  | Debe coincidir con la del tópico. Si falta se usa la del tópico; si es distinta, el mensaje se descarta. |
+| `dispositivoId` | `string`  | Debe coincidir con el del tópico (que es el id del ventilador). Mismas reglas que `incubadoraId`. |
+| `encendido`     | `boolean` | **Obligatorio.** `true` → `estadoActual: "encendido"`, `false` → `"apagado"` (`FAN_STATUS`). Cualquier otro tipo descarta el mensaje. |
+| `velocidad`     | `number`  | Velocidad reportada (0 a 100). Por ahora el servicio no la guarda.            |
+| `actualizadoEn` | `string`  | Fecha del reporte según el dispositivo (ISO 8601, UTC). El servicio no la usa: escribe su propio server timestamp. |
+
+El mensaje **no** incluye `ordenId`. Si el payload no es válido (ver arriba), el
+servicio descarta el mensaje y lo registra en el log; un fallo al procesarlo no
+afecta al resto de los mensajes (mediciones y latidos).
+
+### Qué hace el servicio al recibirlo
+
+1. Toma `incubadoraId` y `dispositivoId` del tópico. El id del ventilador es el
+   `dispositivoId`.
+2. Actualiza `ventiladores/{dispositivoId}` (`estadoActual` y `actualizadoEn`).
+   Si el documento no existe, o pertenece a otra incubadora que la del tópico, lo
+   registra en el log y **no** lo crea (lo crea `crearDispositivo`).
+3. Busca la orden en curso del ventilador (ver más abajo) y, si el estado
+   reportado es el que pedía, la marca `ejecutada` y guarda `ejecutadaEn`.
+
+Si el ventilador no tiene ninguna orden `enviada` (por ejemplo, un reporte
+espontáneo al arrancar el dispositivo), solo se actualiza `estadoActual`.
+
+## Confirmación de las órdenes
+
+El estado final de una orden cumplida es **`ejecutada`** (`COMMAND_STATUS.EXECUTED`
+en el frontend); no existe un estado "confirmada". El flujo completo es
+`pendiente` → `enviando` → `enviada` → `ejecutada`, con `fallida` y `expirada`
+como finales alternativos (ver `docs/modelo-datos.md`).
+
+### Correlación por "la más reciente en `enviada`"
+
+Como el estado no trae `ordenId`, el servicio toma la orden **más reciente del
+ventilador que esté en `enviada`** (consulta por `ventiladorId` ordenada por
+`creadaEn` descendente, filtrando el estado en memoria) y la marca `ejecutada`
+solo si la acción pedida coincide con el estado reportado: `encender` ↔
+`encendido`, `apagar` ↔ `apagado`. Si no coincide, la orden sigue `enviada`.
+
+**Limitación.** Con varias órdenes en vuelo para el mismo ventilador, un estado
+puede cerrar una orden que no es la que lo provocó. **Alternativa más robusta:**
+que el dispositivo repita en el mensaje de estado el `ordenId` recibido en el
+comando. Eso exige cambiar este contrato, el simulador
+(`iot-integration-service/simulator/simulador.js`) y la correlación del servicio;
+para esta versión se mantiene la correlación por "la más reciente".
+
+### Timeout: órdenes que nadie confirma
+
+Un barrido periódico dentro del servicio (uno al arrancar y luego uno cada 10
+segundos, con una sola consulta `estado == "enviada"`) marca `fallida` toda
+orden `enviada` cuyo `enviadaEn` tenga más antigüedad que el timeout, con el
+motivo en `error`. Si falta `enviadaEn`, se usa `actualizadaEn` y luego
+`creadaEn`. Al no depender de un temporizador por orden, también cierra las
+órdenes que quedaron `enviada` si el servicio se reinició. `estadoActual` no se
+modifica al vencer una orden.
+
+- **Variable de entorno:** `ORDEN_CONFIRMACION_TIMEOUT_SEGUNDOS` (por defecto
+  **30**; un valor inválido se reemplaza por el defecto). El barrido corre cada
+  10 segundos, por lo que una orden puede tardar hasta ese margen más en
+  marcarse.
+- **Carreras.** Tanto `ejecutada` como `fallida` se escriben en una transacción
+  que exige que la orden siga `enviada`: gana quien llegue primero y el otro no
+  pisa el resultado.
+- **Confirmación tardía.** Una orden que ya venció (`fallida`) no se reabre si el
+  dispositivo confirma después; solo se actualiza `estadoActual`.
+
 ## Detección de desconexión
 
 Cada dispositivo debe publicar un mensaje en
@@ -116,11 +198,12 @@ otra.
 
 ## Notas
 
-- El payload del comando de ventilador está definido arriba. El payload
-  exacto de los demás mensajes (formato JSON, campos) se especificará junto
-  con la implementación del Servicio de Integración IoT en el Sprint 2. Este
-  documento fija la convención de nombres de tópicos, el payload del comando
-  y la regla de desconexión, que ya forman parte del contrato entre
+- Los payloads del comando y del estado del ventilador están definidos arriba.
+  El payload exacto de los demás mensajes (formato JSON, campos) se
+  especificará junto con la implementación del Servicio de Integración IoT en
+  el Sprint 2. Este documento fija la convención de nombres de tópicos, los
+  payloads del comando y del estado del ventilador, la confirmación de las
+  órdenes y la regla de desconexión, que ya forman parte del contrato entre
   dispositivos y backend.
 - Ningún cliente del frontend web publica ni se suscribe a estos tópicos
   directamente; el frontend solo lee el estado ya reflejado en Firestore.
