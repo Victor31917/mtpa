@@ -15,7 +15,7 @@ const FanStatusCard = ({
     conectados;
 
   return (
-    <article className="dashboard-card">
+    <article className="dashboard-card dashboard-card--fans">
       <div className="dashboard-card__header">
         <h3>Ventiladores</h3>
       </div>

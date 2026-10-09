@@ -94,6 +94,38 @@ export const suscribirseADispositivosPorIncubadora = (
 
 
 // =========================================================
+// SUSCRIBIRSE A TODOS LOS DISPOSITIVOS (TIEMPO REAL)
+// =========================================================
+
+/**
+ * Se suscribe (onSnapshot) a la colección "dispositivos" completa, para
+ * calcular el estado general de cada incubadora (resumen del panel).
+ *
+ * Asume pocos dispositivos (decenas, no miles): cada cambio en
+ * cualquiera de ellos vuelve a emitir la lista entera.
+ *
+ * @param {(dispositivos: Object[]) => void} onCambio Se invoca con la
+ * lista actualizada cada vez que cambia algo en Firestore.
+ * @param {(error: Error) => void} [onError]
+ * @returns {() => void} Función "unsubscribe": hay que invocarla en el
+ * cleanup del efecto que la usa para no dejar el listener colgado.
+ */
+export const suscribirseATodosLosDispositivos = (onCambio, onError) =>
+  onSnapshot(
+    collection(db, COLLECTIONS.DEVICES),
+    (snapshot) => {
+      onCambio(
+        snapshot.docs.map((documento) => ({
+          id: documento.id,
+          ...documento.data(),
+        }))
+      );
+    },
+    onError
+  );
+
+
+// =========================================================
 // DAR DE ALTA UN DISPOSITIVO
 // =========================================================
 
@@ -122,5 +154,6 @@ export const crearDispositivo = async (datos) => {
 export default {
   listarDispositivosPorIncubadora,
   suscribirseADispositivosPorIncubadora,
+  suscribirseATodosLosDispositivos,
   crearDispositivo,
 };

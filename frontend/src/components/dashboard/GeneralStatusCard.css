@@ -1,0 +1,35 @@
+/* =========================================================
+   M.T.P.A. - TARJETA DE ESTADO GENERAL
+   La base .dashboard-card está en pages/dashboard/Dashboard.css.
+   Aquí se resalta el estado: normal, advertencia, crítico.
+   ========================================================= */
+
+.dashboard-card--general .dashboard-card__value {
+  font-size: var(--font-size-2xl);
+}
+
+.dashboard-card--estado-normal {
+  border-color: var(--color-success);
+}
+
+.dashboard-card--estado-normal .dashboard-card__value {
+  color: var(--color-success-dark);
+}
+
+.dashboard-card--estado-advertencia {
+  background-color: var(--color-warning-light);
+  border-color: var(--color-warning);
+}
+
+.dashboard-card--estado-advertencia .dashboard-card__value {
+  color: var(--color-warning-dark);
+}
+
+.dashboard-card--estado-critico {
+  background-color: var(--color-danger-light);
+  border-color: var(--color-danger);
+}
+
+.dashboard-card--estado-critico .dashboard-card__value {
+  color: var(--color-danger-dark);
+}

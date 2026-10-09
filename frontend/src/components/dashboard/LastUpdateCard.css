@@ -1,0 +1,9 @@
+/* =========================================================
+   M.T.P.A. - TARJETA DE ÚLTIMA ACTUALIZACIÓN
+   La base .dashboard-card está en pages/dashboard/Dashboard.css.
+   ========================================================= */
+
+/* Más específico que la base para no depender del orden de los CSS. */
+.dashboard-card .dashboard-card__value--small {
+  font-size: var(--font-size-lg);
+}
