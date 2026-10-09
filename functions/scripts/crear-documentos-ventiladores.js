@@ -23,20 +23,31 @@
  *   NUNCA sobrescribe uno existente (usa create()).
  * - Un dispositivo ventilador sin "incubadoraId" válido se omite y se
  *   informa: hay que corregirlo a mano.
+ * - Exige indicar EXACTAMENTE un modo, para que un error de tipeo no
+ *   escriba por accidente: "--dry-run" (simula, no escribe) o
+ *   "--confirmar" (escribe). Sin argumentos, con un argumento
+ *   desconocido o con ambos modos, no hace nada y termina con código 2.
+ * - El proyecto de Firebase destino lo define la cuenta de servicio de
+ *   GOOGLE_APPLICATION_CREDENTIALS. El script lee su "project_id", lo usa
+ *   explícitamente e imprime "Proyecto de Firebase: <id>" antes de hacer
+ *   nada: revisalo antes de confirmar.
  *
  * Uso (desde functions/). Primero en modo simulación, que no escribe:
  *
  *   GOOGLE_APPLICATION_CREDENTIALS="./service-account.json" \
  *   node scripts/crear-documentos-ventiladores.js --dry-run
  *
- * Y luego en serio:
+ * Y luego, tras revisar el proyecto y el informe, en serio:
  *
  *   GOOGLE_APPLICATION_CREDENTIALS="./service-account.json" \
- *   node scripts/crear-documentos-ventiladores.js
+ *   node scripts/crear-documentos-ventiladores.js --confirmar
  *
- * Termina con código distinto de 0 si hubo errores.
+ * Códigos de salida: 0 = terminó bien; 1 = hubo errores al leer o
+ * escribir en Firestore; 2 = uso incorrecto (argumentos) o no se pudo
+ * leer "project_id" de las credenciales (no se escribió nada).
  */
 
+const fs = require("fs");
 const admin = require("firebase-admin");
 const { construirDocumentoVentilador } = require("../lib/ventilador");
 
@@ -57,10 +68,60 @@ const dividirEnLotes = (elementos) => {
   return lotes;
 };
 
-const main = async () => {
-  const dryRun = process.argv.slice(2).includes("--dry-run");
+const ARGUMENTOS_VALIDOS = ["--dry-run", "--confirmar"];
 
-  admin.initializeApp();
+// Devuelve true si es simulación (--dry-run) y false si debe escribir
+// (--confirmar). Ante cualquier otra combinación termina con código 2.
+const leerModo = () => {
+  const args = process.argv.slice(2);
+  const desconocidos = args.filter((a) => !ARGUMENTOS_VALIDOS.includes(a));
+
+  if (desconocidos.length > 0) {
+    console.error(`Argumentos no reconocidos: ${desconocidos.join(" ")}`);
+    console.error(
+      "Uso: node scripts/crear-documentos-ventiladores.js --dry-run | --confirmar"
+    );
+    process.exit(2);
+  }
+
+  const dryRun = args.includes("--dry-run");
+
+  if (dryRun === args.includes("--confirmar")) {
+    console.error(
+      "Indicá exactamente uno: --dry-run (simula) o --confirmar (escribe)."
+    );
+    process.exit(2);
+  }
+
+  return dryRun;
+};
+
+// Lee el "project_id" de la cuenta de servicio apuntada por
+// GOOGLE_APPLICATION_CREDENTIALS: es el proyecto donde se va a escribir.
+const leerProyecto = () => {
+  const ruta = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+  try {
+    const { project_id: id } = JSON.parse(fs.readFileSync(ruta, "utf8"));
+
+    if (typeof id === "string" && id) return id;
+  } catch (error) {
+    // Se informa abajo.
+  }
+
+  console.error(
+    "No se pudo leer project_id desde GOOGLE_APPLICATION_CREDENTIALS."
+  );
+  process.exit(2);
+};
+
+const main = async () => {
+  const dryRun = leerModo();
+  const projectId = leerProyecto();
+
+  admin.initializeApp({ projectId });
+
+  console.log(`Proyecto de Firebase: ${projectId}`);
 
   const db = admin.firestore();
 
