@@ -4,6 +4,72 @@
    ========================================================= */
 
 /* Más específico que la base para no depender del orden de los CSS. */
-.dashboard-card .dashboard-card__value--small {
-  font-size: var(--font-size-lg);
+.last-update-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  background-color: var(--color-white);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  min-width: 0;
+}
+
+.last-update-card__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  color: var(--color-primary);
+  background-color: var(--color-background);
+  border-radius: 50%;
+}
+
+.last-update-card__icon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.last-update-card__content {
+  min-width: 0;
+}
+
+.last-update-card__title {
+  margin: 0 0 8px;
+  color: var(--color-text);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.last-update-card__relative {
+  margin: 0 0 5px;
+  color: var(--color-primary);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.last-update-card__date {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 480px) {
+  .last-update-card {
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .last-update-card__icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  .last-update-card__relative {
+    font-size: 16px;
+  }
 }

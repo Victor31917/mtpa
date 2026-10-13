@@ -1,49 +1,65 @@
+import React, { useEffect, useState } from "react";
+import {
+  timeAgo,
+  formatDateTime,
+  isValidDate,
+} from "../../utils/dateutils";
 import "./LastUpdateCard.css";
 
-const formatDate = (value) => {
-  if (!value) {
-    return "Sin datos";
-  }
+const LastUpdateCard = ({ ultimaMedicionEn }) => {
+  const [ahora, setAhora] = useState(() => new Date());
 
-  const date =
-    typeof value?.toDate === "function"
-      ? value.toDate()
-      : new Date(value);
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      setAhora(new Date());
+    }, 1000);
 
-  if (Number.isNaN(date.getTime())) {
-    return "Sin datos";
-  }
+    return () => clearInterval(intervalId);
+  }, []);
 
-  return new Intl.DateTimeFormat(
-    "es-CO",
-    {
-      dateStyle: "short",
-      timeStyle: "medium",
-    }
-  ).format(date);
-};
+  const fechaValida = isValidDate(ultimaMedicionEn);
 
-const LastUpdateCard = ({
-  medicion,
-}) => {
+  const tiempoRelativo = fechaValida
+    ? timeAgo(ultimaMedicionEn, ahora)
+    : "Sin mediciones registradas";
+
+  const fechaCompleta = fechaValida
+    ? formatDateTime(ultimaMedicionEn)
+    : "Fecha no disponible";
+
   return (
-    <article className="dashboard-card">
-      <div className="dashboard-card__header">
-        <h3>Última actualización</h3>
+    <section
+      className="last-update-card"
+      aria-label="Última actualización"
+    >
+      <div className="last-update-card__icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </svg>
       </div>
 
-      <strong className="dashboard-card__value dashboard-card__value--small">
-        {formatDate(
-          medicion?.medidoEn
-        )}
-      </strong>
+      <div className="last-update-card__content">
+        <h3 className="last-update-card__title">
+          Última actualización
+        </h3>
 
-      <p>
-        {medicion
-          ? `Variable: ${medicion.variable}`
-          : "Sin mediciones."}
-      </p>
-    </article>
+        <p className="last-update-card__relative">
+          {tiempoRelativo}
+        </p>
+
+        <p className="last-update-card__date">
+          {fechaCompleta}
+        </p>
+      </div>
+    </section>
   );
 };
 
