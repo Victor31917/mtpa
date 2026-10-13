@@ -1,13 +1,57 @@
+
 {
   "indexes": [
     {
-      "collectionGroup": "ordenes_ventilador",
+      "collectionGroup": "mediciones",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "ventiladorId", "order": "ASCENDING" },
-        { "fieldPath": "creadaEn", "order": "DESCENDING" }
+        {
+          "fieldPath": "incubadoraId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "variable",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "medidoEn",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "estadisticas_diarias",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "incubadoraId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "variable",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "fecha",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "auditoria",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "tipoEvento",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "ocurridoEn",
+          "order": "DESCENDING"
+        }
       ]
     }
   ],
   "fieldOverrides": []
 }
+

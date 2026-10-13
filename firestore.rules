@@ -197,5 +197,105 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow create, update, delete: if false;
     }
+
+
+
   }
 }
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Verifica si el usuario autenticado es administrador.
+    // Ajusta esta función si tu proyecto ya tiene una implementación
+    // de isAdmin() basada en roles o documentos de usuarios.
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.admin == true;
+    }
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // 1. ESTADÍSTICAS DIARIAS
+    // Cualquier usuario autenticado puede leer.
+    // Solo el servidor con Admin SDK puede escribir.
+    match /estadisticas_diarias/{id} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+
+    // 2. AUDITORÍA
+    // Solo administradores pueden consultar.
+    // La escritura queda reservada al servidor.
+    match /auditoria/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // 3. ALERTAS
+    match /alertas/{id} {
+      allow read: if isAuthenticated();
+
+      // La creación debe seguir la política existente
+      // de tu proyecto.
+      allow create: if false;
+
+      // El cliente solo puede cambiar el estado y el campo
+      // correspondiente al usuario que realizó la acción.
+      allow update: if isAuthenticated()
+        && request.resource.data.diff(resource.data)
+          .affectedKeys()
+          .hasOnly([
+            'estado',
+            'reconocidaPor',
+            'resueltaPor'
+          ])
+        && (
+          (
+            request.resource.data.estado == 'reconocida'
+            && request.resource.data.reconocidaPor
+              == request.auth.uid
+            && !request.resource.data.diff(resource.data)
+              .affectedKeys().hasAny(['resueltaPor'])
+          )
+          ||
+          (
+            request.resource.data.estado == 'resuelta'
+            && request.resource.data.resueltaPor
+              == request.auth.uid
+            && !request.resource.data.diff(resource.data)
+              .affectedKeys().hasAny(['reconocidaPor'])
+          )
+        );
+
+      // La eliminación queda bloqueada desde el cliente.
+      allow delete: if false;
+    }
+
+    // 4. UMBRALES
+    // El usuario debe identificarse como autor del cambio.
+    match /umbrales/{id} {
+      allow read: if isAuthenticated();
+
+      allow create: if isAuthenticated()
+        && request.resource.data.actualizadoPor
+          == request.auth.uid;
+
+      allow update: if isAuthenticated()
+        && request.resource.data.actualizadoPor
+          == request.auth.uid;
+
+      allow delete: if false;
+    }
+
+    // Denegar el acceso a cualquier colección no declarada.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
