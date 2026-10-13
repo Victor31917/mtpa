@@ -3,7 +3,11 @@ const admin = require("firebase-admin");
 const crypto = require("crypto");
 const { construirDocumentoVentilador } = require("./lib/ventilador");
 
-admin.initializeApp();
+if (admin.apps.length === 0) {
+  admin.initializeApp();
+}
+
+const db = admin.firestore();
 
 // =========================================================
 // ROLES VÁLIDOS
@@ -60,6 +64,16 @@ const TIPOS_DISPOSITIVO_VALIDOS = [
   "sensor_humedad",
   "ventilador",
 ];
+
+
+const {
+  instanteAFecha,
+  idEstadisticaDiaria,
+} = require("./lib/estadisticas");
+
+const ZONA = "America/Bogota";
+const VARIABLES = ["temperatura", "humedad"];
+const TAMANO_PAGINA = 500;
 
 /**
  * Helper compartido: exige sesión activa y uno de los roles
@@ -1934,6 +1948,309 @@ exports.guardarReglaAutomatizacion = functions.https.onCall(
       );
     }
 
+    /**
+ * Obtiene las partes de una fecha en una zona horaria.
+ */
+function partesEnZona(instante, zona) {
+  const partes = new Intl.DateTimeFormat("en-CA", {
+    timeZone: zona,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(instante);
+
+  return Object.fromEntries(
+    partes.map((parte) => [parte.type, parte.value])
+  );
+}
+
+/**
+ * Convierte una fecha/hora local de una zona horaria a Date UTC.
+ * Se usa para obtener los límites exactos del día, incluso cuando
+ * cambia el horario de verano en zonas que lo utilizan.
+ */
+function fechaLocalAUTC(anio, mes, dia, hora, zona) {
+  const objetivo = Date.UTC(anio, mes - 1, dia, hora, 0, 0);
+  let estimacion = objetivo;
+
+  for (let i = 0; i < 5; i++) {
+    const partes = partesEnZona(new Date(estimacion), zona);
+
+    const representado = Date.UTC(
+      Number(partes.year),
+      Number(partes.month) - 1,
+      Number(partes.day),
+      Number(partes.hour),
+      Number(partes.minute),
+      Number(partes.second)
+    );
+
+    const diferencia = objetivo - representado;
+
+    if (diferencia === 0) {
+      return new Date(estimacion);
+    }
+
+    estimacion += diferencia;
+  }
+
+  const resultado = new Date(estimacion);
+  const partesFinales = partesEnZona(resultado, zona);
+
+  if (
+    Number(partesFinales.year) !== anio ||
+    Number(partesFinales.month) !== mes ||
+    Number(partesFinales.day) !== dia ||
+    Number(partesFinales.hour) !== hora
+  ) {
+    throw new Error(
+      `No se pudo calcular la hora local ${anio}-${mes}-${dia} ${hora}:00 en ${zona}`
+    );
+  }
+
+  return resultado;
+}
+
+/**
+ * Calcula los límites UTC del día anterior en la zona del proyecto.
+ * El intervalo es [inicio, fin): incluye inicio y excluye fin.
+ */
+function obtenerIntervaloDiaAnterior(ahora = new Date(), zona = ZONA) {
+  const fechaActual = partesEnZona(ahora, zona);
+
+  // Mediodía UTC como referencia segura para avanzar/retroceder
+  // fechas de calendario sin depender de la duración del día.
+  const hoyCalendario = new Date(
+    Date.UTC(
+      Number(fechaActual.year),
+      Number(fechaActual.month) - 1,
+      Number(fechaActual.day) - 1,
+      12
+    )
+  );
+
+  const ayer = {
+    anio: hoyCalendario.getUTCFullYear(),
+    mes: hoyCalendario.getUTCMonth() + 1,
+    dia: hoyCalendario.getUTCDate(),
+  };
+
+  const mananaCalendario = new Date(
+    Date.UTC(ayer.anio, ayer.mes - 1, ayer.dia + 1, 12)
+  );
+
+  const inicio = fechaLocalAUTC(
+    ayer.anio,
+    ayer.mes,
+    ayer.dia,
+    0,
+    zona
+  );
+
+  const fin = fechaLocalAUTC(
+    mananaCalendario.getUTCFullYear(),
+    mananaCalendario.getUTCMonth() + 1,
+    mananaCalendario.getUTCDate(),
+    0,
+    zona
+  );
+
+  return {
+    fecha: `${ayer.anio}-${String(ayer.mes).padStart(2, "0")}-${String(
+      ayer.dia
+    ).padStart(2, "0")}`,
+    inicio,
+    fin,
+  };
+}
+
+/**
+ * Acumulador estadístico en una sola pasada.
+ * No conserva todas las mediciones en memoria.
+ * Utiliza el algoritmo de Welford para la varianza poblacional.
+ */
+function crearAcumulador() {
+  return {
+    cantidad: 0,
+    promedio: 0,
+    sumaCuadradosDiferencias: 0,
+    minimo: Infinity,
+    maximo: -Infinity,
+
+    agregar(valor) {
+      if (typeof valor !== "number" || !Number.isFinite(valor)) {
+        return;
+      }
+
+      this.cantidad += 1;
+
+      const diferencia = valor - this.promedio;
+      this.promedio += diferencia / this.cantidad;
+
+      const diferenciaPosterior = valor - this.promedio;
+
+      this.sumaCuadradosDiferencias +=
+        diferencia * diferenciaPosterior;
+
+      this.minimo = Math.min(this.minimo, valor);
+      this.maximo = Math.max(this.maximo, valor);
+    },
+
+    resultado() {
+      if (this.cantidad === 0) {
+        return null;
+      }
+
+      return {
+        cantidad: this.cantidad,
+        promedio: this.promedio,
+        maximo: this.maximo,
+        minimo: this.minimo,
+        desviacion: Math.sqrt(
+          Math.max(
+            0,
+            this.sumaCuadradosDiferencias / this.cantidad
+          )
+        ),
+      };
+    },
+  };
+}
+
+/**
+ * Lee las mediciones en páginas y calcula sus estadísticas.
+ */
+async function calcularPorIncubadoraYVariable(
+  incubadoraId,
+  variable,
+  inicio,
+  fin
+) {
+  const acumulador = crearAcumulador();
+  const medicionesRef = db.collection("mediciones");
+
+  let ultimaMedicion = null;
+
+  while (true) {
+    let consulta = medicionesRef
+      .where("incubadoraId", "==", incubadoraId)
+      .where("variable", "==", variable)
+      .where("medidoEn", ">=", admin.firestore.Timestamp.fromDate(inicio))
+      .where("medidoEn", "<", admin.firestore.Timestamp.fromDate(fin))
+      .orderBy("medidoEn", "asc")
+      .limit(TAMANO_PAGINA);
+
+    if (ultimaMedicion) {
+      consulta = consulta.startAfter(ultimaMedicion);
+    }
+
+    const pagina = await consulta.get();
+
+    if (pagina.empty) {
+      break;
+    }
+
+    for (const documento of pagina.docs) {
+      const medicion = documento.data();
+
+      // Ajusta "valor" si tu modelo de datos usa otro nombre
+      // para el campo numérico de la medición.
+      acumulador.agregar(medicion.valor);
+    }
+
+    ultimaMedicion = pagina.docs[pagina.docs.length - 1];
+
+    if (pagina.size < TAMANO_PAGINA) {
+      break;
+    }
+  }
+
+  return acumulador.resultado();
+}
+
+/**
+ * Calcula y guarda las estadísticas del día anterior.
+ *
+ * Los errores se aíslan por cada par incubadora-variable.
+ */
+exports.agregarEstadisticasDiarias = functions
+  .runWith({
+    timeoutSeconds: 540,
+    memory: "512MB",
+  })
+  .pubsub.schedule("0 2 * * *")
+  .timeZone(ZONA)
+  .onRun(async () => {
+    const { fecha, inicio, fin } = obtenerIntervaloDiaAnterior(
+      new Date(),
+      ZONA
+    );
+
+    console.log(
+      `Calculando estadísticas del ${fecha} (${ZONA}).`,
+      {
+        inicio: inicio.toISOString(),
+        fin: fin.toISOString(),
+      }
+    );
+
+    const incubadorasSnapshot = await db.collection("incubadoras").get();
+
+    for (const incubadoraDoc of incubadorasSnapshot.docs) {
+      const incubadoraId = incubadoraDoc.id;
+
+      for (const variable of VARIABLES) {
+        try {
+          const estadisticas =
+            await calcularPorIncubadoraYVariable(
+              incubadoraId,
+              variable,
+              inicio,
+              fin
+            );
+
+          // No crear documentos si no hubo mediciones válidas.
+          if (!estadisticas) {
+            console.log(
+              `Sin mediciones válidas: ${incubadoraId}/${variable}/${fecha}`
+            );
+            continue;
+          }
+
+          const id = idEstadisticaDiaria(
+            incubadoraId,
+            variable,
+            fecha
+          );
+
+          await db.collection("estadisticas_diarias").doc(id).set({
+            incubadoraId,
+            variable,
+            fecha,
+            ...estadisticas,
+            calculadoEn: admin.firestore.FieldValue.serverTimestamp(),
+          });
+
+          console.log(`Estadísticas guardadas: ${id}`);
+        } catch (error) {
+          console.error(
+            `Error calculando estadísticas para incubadora=${incubadoraId}, variable=${variable}, fecha=${fecha}:`,
+            error
+          );
+
+          // Continúa con la siguiente variable o incubadora.
+        }
+      }
+    }
+
+    console.log(`Proceso de estadísticas diarias finalizado: ${fecha}.`);
+    return null;
+  });
+
     const batch = db.batch();
 
     batch.update(ventiladorRef, { modoControl });
@@ -1965,4 +2282,5 @@ exports.guardarReglaAutomatizacion = functions.https.onCall(
     };
   }
 );
+
 
