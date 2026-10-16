@@ -1,68 +1,92 @@
+
 import {
   collection,
-  limit,
-  onSnapshot,
-  orderBy,
   query,
+  where,
+  orderBy,
+  limit,
+  getDocs,
 } from "firebase/firestore";
 
-import { db } from "../services/firebase";
-import { COLLECTIONS } from "../utils/constants";
+import { db } from "../firebase/firebaseConfig";
 
-// Máximo de mediciones recientes que se mantienen escuchando.
-const LIMITE_MEDICIONES = 200;
+// Límite predeterminado para las consultas históricas.
+const LIMITE_MEDICIONES = 5000;
 
 /**
- * Suscripción en tiempo real a las mediciones más recientes
- * pertenecientes a una incubadora.
+ * Obtiene las mediciones de una incubadora dentro de un rango de fechas.
  *
- * La consulta usa solo orderBy("medidoEn") + limit, que no requiere
- * índice compuesto (where("incubadoraId") + orderBy("medidoEn") sí lo
- * requeriría); por eso se filtra por incubadora en el cliente. El límite
- * se aplica antes del filtro, así que con varias incubadoras enviando
- * datos la ventana puede contener pocas mediciones de la seleccionada.
+ * @param {Object} params
+ * @param {string} params.incubadoraId
+ * @param {string} params.variable
+ * @param {Date} params.desde
+ * @param {Date} params.hasta
+ * @param {number} [params.limite=5000]
  *
- * @param {string} incubadoraId
- * @param {(mediciones: Object[]) => void} onCambio
- * @param {(error: Error) => void} onError
- * @returns {() => void} unsubscribe
+ * @returns {Promise<{mediciones: Array, truncado: boolean}>}
  */
-export const suscribirseAMedicionesPorIncubadora = (
+export async function obtenerMedicionesPorRango({
   incubadoraId,
-  onCambio,
-  onError
-) => {
-  if (!incubadoraId) {
-    return () => {};
+  variable,
+  desde,
+  hasta,
+  limite = LIMITE_MEDICIONES,
+}) {
+  if (!incubadoraId || !variable) {
+    throw new Error(
+      "Debes indicar la incubadora y la variable."
+    );
   }
 
-  const referencia = query(
-    collection(db, COLLECTIONS.MEASUREMENTS),
-    orderBy("medidoEn", "desc"),
-    limit(LIMITE_MEDICIONES)
+  if (!(desde instanceof Date) || !(hasta instanceof Date)) {
+    throw new Error(
+      "Las fechas desde y hasta deben ser objetos Date."
+    );
+  }
+
+  if (
+    Number.isNaN(desde.getTime()) ||
+    Number.isNaN(hasta.getTime()) ||
+    desde > hasta
+  ) {
+    throw new Error("El rango de fechas no es válido.");
+  }
+
+  if (!Number.isInteger(limite) || limite < 1) {
+    throw new Error("El límite debe ser un entero positivo.");
+  }
+
+  const medicionesRef = collection(db, "mediciones");
+
+  const consulta = query(
+    medicionesRef,
+    where("incubadoraId", "==", incubadoraId),
+    where("variable", "==", variable),
+    where("medidoEn", ">=", desde),
+    where("medidoEn", "<=", hasta),
+    orderBy("medidoEn", "asc"),
+    limit(limite)
   );
 
-  return onSnapshot(
-    referencia,
-    (snapshot) => {
-      const mediciones = snapshot.docs
-        .map((documento) => ({
-          id: documento.id,
-          ...documento.data(),
-        }))
-        .filter(
-          (medicion) =>
-            medicion.incubadoraId === incubadoraId
-        );
+  const snapshot = await getDocs(consulta);
 
-      onCambio(mediciones);
-    },
-    onError
-  );
-};
+  const mediciones = snapshot.docs.map((documento) => {
+    const datos = documento.data();
 
-const medicionesRepository = {
-  suscribirseAMedicionesPorIncubadora,
-};
+    return {
+      id: documento.id,
+      ...datos,
+      medidoEn:
+        datos.medidoEn?.toDate instanceof Function
+          ? datos.medidoEn.toDate()
+          : datos.medidoEn instanceof Date
+            ? datos.medidoEn
+            : null,
+    };
+  });
 
-export default medicionesRepository;
+  return {
+    mediciones,
+    truncado: mediciones.length >= limite,
+  };
+}
