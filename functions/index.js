@@ -1966,3 +1966,291 @@ exports.guardarReglaAutomatizacion = functions.https.onCall(
   }
 );
 
+
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
+const { generarReporte } = require("./lib/reportes");
+
+const db = admin.firestore();
+const bucket = admin.storage().bucket();
+
+// ADAPTAR a los tres roles reales de tu proyecto.
+const ROLES_EXPORTACION = [
+  "admin",
+  "operador",
+  "analista",
+];
+
+// ADAPTAR al límite definido en Sprint 5 - 09.
+const MAX_FILAS_REPORTE = 10000;
+
+// ADAPTAR a las variables admitidas por tu aplicación.
+const VARIABLES_VALIDAS = [
+  "temperatura",
+  "humedad",
+  "co2",
+];
+
+// ADAPTAR a los formatos implementados en lib/reportes.js.
+const FORMATOS_VALIDOS = ["csv", "xlsx", "pdf"];
+
+const EXTENSIONES = {
+  csv: "csv",
+  xlsx: "xlsx",
+  pdf: "pdf",
+};
+
+function parsearFecha(valor, nombreCampo) {
+  if (typeof valor !== "string" || !valor.trim()) {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      `El campo ${nombreCampo} debe ser una fecha válida.`
+    );
+  }
+
+  const fecha = new Date(valor);
+
+  if (Number.isNaN(fecha.getTime())) {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      `El campo ${nombreCampo} no contiene una fecha válida.`
+    );
+  }
+
+  return fecha;
+}
+
+function limpiarNombre(valor) {
+  return String(valor)
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .slice(0, 80);
+}
+
+exports.exportarReporte = functions
+  .runWith({
+    timeoutSeconds: 300,
+    memory: "512MB",
+  })
+  .https.onCall(async (data, context) => {
+    // 1. Autenticación.
+    if (!context.auth) {
+      throw new functions.https.HttpsError(
+        "unauthenticated",
+        "Debes iniciar sesión para exportar reportes."
+      );
+    }
+
+    // 2. Autorización. Ajusta la firma si tu helper
+    // requireRole utiliza otra convención.
+    await requireRole(context, ROLES_EXPORTACION);
+
+    // 3. Validación del payload.
+    const {
+      tipo,
+      formato,
+      incubadoraId,
+      variable,
+      desde,
+      hasta,
+    } = data || {};
+
+    if (!["historico", "estadisticas"].includes(tipo)) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "El tipo debe ser historico o estadisticas."
+      );
+    }
+
+    if (!FORMATOS_VALIDOS.includes(formato)) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        `Formato inválido. Usa: ${FORMATOS_VALIDOS.join(", ")}.`
+      );
+    }
+
+    if (
+      typeof incubadoraId !== "string" ||
+      !incubadoraId.trim() ||
+      incubadoraId.includes("/")
+    ) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "Debes indicar una incubadora válida."
+      );
+    }
+
+    if (!VARIABLES_VALIDAS.includes(variable)) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "La variable solicitada no está permitida."
+      );
+    }
+
+    const fechaDesde = parsearFecha(desde, "desde");
+    const fechaHasta = parsearFecha(hasta, "hasta");
+
+    if (fechaDesde >= fechaHasta) {
+      throw new functions.https.HttpsError(
+        "invalid-argument",
+        "La fecha desde debe ser anterior a la fecha hasta."
+      );
+    }
+
+    // 4. Verificar que la incubadora existe.
+    const incubadoraRef = db
+      .collection("incubadoras")
+      .doc(incubadoraId);
+
+    const incubadoraSnap = await incubadoraRef.get();
+
+    if (!incubadoraSnap.exists) {
+      throw new functions.https.HttpsError(
+        "not-found",
+        "La incubadora indicada no existe."
+      );
+    }
+
+    // 5. Consultar la colección y el campo temporal.
+    const coleccion =
+      tipo === "historico"
+        ? "mediciones"
+        : "estadisticas_diarias";
+
+    const campoFecha =
+      tipo === "historico"
+        ? "medidoEn"
+        : "fecha";
+
+    // Este ejemplo supone que ambas colecciones contienen
+    // incubadoraId y variable, y que el campo temporal
+    // es compatible con consultas de rango de Firestore.
+    let consulta = db
+      .collection(coleccion)
+      .where("incubadoraId", "==", incubadoraId)
+      .where("variable", "==", variable)
+      .where(campoFecha, ">=", fechaDesde)
+      .where(campoFecha, "<=", fechaHasta)
+      .orderBy(campoFecha)
+      .limit(MAX_FILAS_REPORTE + 1);
+
+    const resultado = await consulta.get();
+
+    // 6. Rechazar rangos que excedan el límite.
+    if (resultado.size > MAX_FILAS_REPORTE) {
+      throw new functions.https.HttpsError(
+        "resource-exhausted",
+        `El reporte supera el máximo de ${MAX_FILAS_REPORTE} filas. Reduce el rango de fechas e inténtalo nuevamente.`
+      );
+    }
+
+    const filas = resultado.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    // 7. Generar el archivo con lib/reportes.js.
+    // Se espera que generarReporte devuelva un Buffer.
+    const contenido = await generarReporte({
+      tipo,
+      formato,
+      incubadoraId,
+      variable,
+      desde: fechaDesde,
+      hasta: fechaHasta,
+      filas,
+    });
+
+    if (!Buffer.isBuffer(contenido)) {
+      throw new functions.https.HttpsError(
+        "internal",
+        "El generador no devolvió un archivo válido."
+      );
+    }
+
+    // 8. Guardar el archivo en Storage.
+    const marcaDeTiempo = Date.now();
+    const nombreArchivo =
+      `${marcaDeTiempo}_` +
+      `${limpiarNombre(incubadoraId)}_` +
+      `${limpiarNombre(variable)}.${EXTENSIONES[formato]}`;
+
+    const rutaArchivo =
+      `reportes/${context.auth.uid}/${nombreArchivo}`;
+
+    const archivo = bucket.file(rutaArchivo);
+
+    await archivo.save(contenido, {
+      resumable: false,
+      metadata: {
+        contentType: {
+          csv: "text/csv",
+          xlsx:
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          pdf: "application/pdf",
+        }[formato],
+        metadata: {
+          tipo,
+          incubadoraId,
+          variable,
+          usuarioId: context.auth.uid,
+        },
+      },
+    });
+
+    // 9. Crear una URL firmada de lectura válida por 15 minutos.
+    const expiraEn = Date.now() + 15 * 60 * 1000;
+
+    let url;
+
+    try {
+      [url] = await archivo.getSignedUrl({
+        version: "v4",
+        action: "read",
+        expires: expiraEn,
+      });
+    } catch (error) {
+      // Evitar dejar el archivo almacenado si no se pudo
+      // generar el enlace.
+      await archivo.delete().catch(() => {});
+      throw new functions.https.HttpsError(
+        "internal",
+        "No fue posible generar el enlace de descarga."
+      );
+    }
+
+    // 10. Registrar auditoría solo tras completar
+    // la generación y obtener la URL firmada.
+    try {
+      await registrarEvento({
+        context,
+        tipoEvento: "reporte_exportado",
+        entidadAfectada: rutaArchivo,
+        detalle: {
+          accion: "exportar",
+          tipo,
+          formato,
+          incubadoraId,
+          variable,
+          filas: filas.length,
+          desde: fechaDesde.toISOString(),
+          hasta: fechaHasta.toISOString(),
+        },
+      });
+    } catch (error) {
+      await archivo.delete().catch(() => {});
+      throw new functions.https.HttpsError(
+        "internal",
+        "No fue posible registrar la auditoría del reporte."
+      );
+    }
+
+    // 11. Respuesta.
+    return {
+      url,
+      nombreArchivo,
+      expiraEn: new Date(expiraEn).toISOString(),
+      filas: filas.length,
+    };
+  });
