@@ -745,3 +745,104 @@ function crearRastreadorConexion({
 module.exports = {
   crearRastreadorConexion,
 };
+
+"use strict";
+
+const TIMEOUT_POR_DEFECTO = 24;
+const TIMEOUT_MINIMO = 15;
+const TIMEOUT_MAXIMO = 180;
+
+function esTimeoutValido(valor) {
+  return (
+    typeof valor === "number" &&
+    Number.isFinite(valor) &&
+    Number.isInteger(valor) &&
+    valor >= TIMEOUT_MINIMO &&
+    valor <= TIMEOUT_MAXIMO
+  );
+}
+
+function resolverTimeout(config) {
+  const respaldo = esTimeoutValido(config.timeoutRespaldoSegundos)
+    ? config.timeoutRespaldoSegundos
+    : TIMEOUT_POR_DEFECTO;
+
+  let valor;
+
+  try {
+    valor =
+      typeof config.timeoutSegundos === "function"
+        ? config.timeoutSegundos()
+        : config.timeoutSegundos;
+  } catch (error) {
+    valor = null;
+  }
+
+  return esTimeoutValido(valor) ? valor : respaldo;
+}
+
+// Integra estas funciones en tu rastreador existente.
+// La resolución se realiza en cada ciclo, no al inicializarlo.
+function crearEstadoConexion(config) {
+  if (typeof config.timeoutSegundos === "undefined") {
+    config.timeoutSegundos = TIMEOUT_POR_DEFECTO;
+  }
+
+  if (typeof config.revisarConexion !== "function") {
+    throw new TypeError(
+      "config.revisarConexion debe ser una función."
+    );
+  }
+
+  let cerrado = false;
+  let temporizador = null;
+
+  const intervaloRevisionMs =
+    Number.isFinite(config.intervaloRevisionMs) &&
+    config.intervaloRevisionMs > 0
+      ? config.intervaloRevisionMs
+      : 1000;
+
+  async function revisar() {
+    if (cerrado) return;
+
+    const timeoutSegundos = resolverTimeout(config);
+
+    try {
+      // La implementación existente debe recibir el timeout
+      // efectivo de esta revisión.
+      await config.revisarConexion({ timeoutSegundos });
+    } catch (error) {
+      console.error(
+        "[estado-conexion] Error al revisar la conexión:",
+        error.message
+      );
+    }
+
+    if (!cerrado) {
+      temporizador = setTimeout(revisar, intervaloRevisionMs);
+    }
+  }
+
+  function iniciar() {
+    if (cerrado || temporizador !== null) return;
+    void revisar();
+  }
+
+  function cerrar() {
+    cerrado = true;
+
+    if (temporizador !== null) {
+      clearTimeout(temporizador);
+      temporizador = null;
+    }
+  }
+
+  return Object.freeze({ iniciar, cerrar });
+}
+
+module.exports = {
+  crearEstadoConexion,
+  esTimeoutValido,
+  resolverTimeout,
+};
