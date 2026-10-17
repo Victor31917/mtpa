@@ -1966,3 +1966,34 @@ exports.guardarReglaAutomatizacion = functions.https.onCall(
   }
 );
 
+
+const ZONA = "America/Bogota"; // Debe coincidir con agregarEstadisticasDiarias.
+
+const TAMANO_LOTE_PURGA = 500;
+const MAX_MEDICIONES_POR_EJECUCION = 50000;
+const RETENCION_MINIMA_MESES = 12;
+
+// Añadir a la lista TIPOS_EVENTO existente:
+const TIPO_EVENTO_PURGA = "purga_historico";
+
+/**
+ * Resta meses calendario sin desbordar el último día del mes.
+ * Ejemplo: 31 de marzo - 1 mes = 28/29 de febrero.
+ */
+function restarMeses(fecha, meses) {
+  const resultado = new Date(fecha);
+  const diaOriginal = resultado.getDate();
+
+  resultado.setDate(1);
+  resultado.setMonth(resultado.getMonth() - meses);
+
+  const ultimoDiaMes = new Date(
+    resultado.getFullYear(),
+    resultado.getMonth() + 1,
+    0
+  ).getDate();
+
+  resultado.setDate(Math.min(diaOriginal, ultimoDiaMes));
+
+  return resultado;
+}
