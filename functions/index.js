@@ -1966,3 +1966,57 @@ exports.guardarReglaAutomatizacion = functions.https.onCall(
   }
 );
 
+
+exports.auditarConfiguracion = functions.firestore
+  .document("config_sistema/{id}")
+  .onWrite(async (change, context) => {
+    const antes = change.before.exists
+      ? change.before.data()
+      : null;
+
+    const despues = change.after.exists
+      ? change.after.data()
+      : null;
+
+    const campos = [
+      "retencionHistoricoMeses",
+      "intervaloMaximoReporteSeg",
+      "purgaActiva",
+    ];
+
+    const detalle = {};
+
+    for (const campo of campos) {
+      const valorAntes = antes?.[campo] ?? null;
+      const valorDespues = despues?.[campo] ?? null;
+
+      if (valorAntes !== valorDespues) {
+        detalle[campo] = {
+          antes: valorAntes,
+          despues: valorDespues,
+        };
+      }
+    }
+
+    // No auditar si ninguno de los parámetros cambió.
+    if (Object.keys(detalle).length === 0) {
+      return null;
+    }
+
+    const usuarioId =
+      despues?.actualizadoPor ||
+      antes?.actualizadoPor ||
+      "desconocido";
+
+    await registrarEvento({
+      usuarioId,
+      tipoEvento: "configuracion_modificada",
+      entidadAfectada: `config_sistema/${context.params.id}`,
+      detalle,
+      opciones: {
+        id: context.eventId,
+      },
+    });
+
+    return null;
+  });
