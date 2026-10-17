@@ -198,4 +198,65 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
   }
+
+  match /b/{bucket}/o {
+    // Denegar toda lectura y escritura desde clientes.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Conserva aquí las demás reglas de tu aplicación.
+
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.admin == true;
+    }
+
+    function configuracionValida() {
+      return request.resource.data.keys().hasAll([
+          'retencionHistoricoMeses',
+          'intervaloMaximoReporteSeg',
+          'purgaActiva',
+          'actualizadoPor',
+          'actualizadoEn'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'retencionHistoricoMeses',
+          'intervaloMaximoReporteSeg',
+          'purgaActiva',
+          'actualizadoPor',
+          'actualizadoEn'
+        ])
+        && request.resource.data.retencionHistoricoMeses is int
+        && request.resource.data.retencionHistoricoMeses >= 12
+        && request.resource.data.retencionHistoricoMeses <= 60
+        && request.resource.data.intervaloMaximoReporteSeg is int
+        && request.resource.data.intervaloMaximoReporteSeg >= 5
+        && request.resource.data.intervaloMaximoReporteSeg <= 60
+        && request.resource.data.purgaActiva is bool
+        && request.resource.data.actualizadoPor == request.auth.uid
+        && request.resource.data.actualizadoEn is timestamp
+        && request.resource.data.actualizadoEn == request.time;
+    }
+
+    match /config_sistema/{id} {
+      // Cualquier usuario autenticado puede leer.
+      allow read: if request.auth != null;
+
+      // Solo administradores pueden crear o modificar,
+      // y siempre deben cumplir el esquema.
+      allow create, update: if isAdmin()
+        && configuracionValida();
+
+      // No se permite eliminar documentos de configuración.
+      allow delete: if false;
+    }
+  }
 }
