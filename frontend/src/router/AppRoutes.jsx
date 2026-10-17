@@ -104,3 +104,53 @@ const AppRoutes = () => {
 };
 
 export default AppRoutes;
+
+import { Routes, Route } from "react-router-dom";
+
+import { ROUTES } from "./routes";
+import PrivateRoute from "./PrivateRoute";
+import RoleRoute from "./RoleRoute";
+
+import Historicos from "../pages/Historicos";
+import Estadisticas from "../pages/Estadisticas";
+import Auditoria from "../pages/Auditoria";
+
+function AppRoutes() {
+  return (
+    <Routes>
+      {/* Otras rutas existentes de la aplicación */}
+
+      {/* Históricos: usuarios autenticados */}
+      <Route
+        path={ROUTES.HISTORY}
+        element={
+          <PrivateRoute>
+            <Historicos />
+          </PrivateRoute>
+        }
+      />
+
+      {/* Estadísticas: usuarios autenticados */}
+      <Route
+        path={ROUTES.STATISTICS}
+        element={
+          <PrivateRoute>
+            <Estadisticas />
+          </PrivateRoute>
+        }
+      />
+
+      {/* Auditoría: solo administrador */}
+      <Route
+        path={ROUTES.AUDIT}
+        element={
+          <RoleRoute allowedRoles={["admin"]}>
+            <Auditoria />
+          </RoleRoute>
+        }
+      />
+    </Routes>
+  );
+}
+
+export default AppRoutes;
