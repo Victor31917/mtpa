@@ -1966,3 +1966,187 @@ exports.guardarReglaAutomatizacion = functions.https.onCall(
   }
 );
 
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
+
+admin.initializeApp();
+
+const db = admin.firestore();
+
+/**
+ * Registra un evento de auditoría con ID determinista.
+ * Si el trigger se reintenta con el mismo eventId,
+ * se reutiliza el documento y no se crea otro evento.
+ */
+async function registrarAuditoria({
+  tipo,
+  usuarioId,
+  entidadAfectada,
+  detalle,
+  id,
+}) {
+  await db.collection("auditoria").doc(id).set({
+    tipo,
+    usuarioId: usuarioId || "desconocido",
+    entidadAfectada,
+    detalle,
+    fecha: admin.firestore.FieldValue.serverTimestamp(),
+  });
+}
+
+/**
+ * Audita cambios en los umbrales.
+ */
+exports.auditarUmbral = functions.firestore
+  .document("umbrales/{id}")
+  .onWrite(async (change, context) => {
+    const antes = change.before.exists
+      ? change.before.data()
+      : null;
+
+    const despues = change.after.exists
+      ? change.after.data()
+      : null;
+
+    // Si el documento fue eliminado, no hay un nuevo estado que auditar.
+    if (!despues) {
+      return null;
+    }
+
+    // En una creación, los valores anteriores se consideran null.
+    const minimoAntes = antes ? antes.minimo ?? null : null;
+    const maximoAntes = antes ? antes.maximo ?? null : null;
+
+    const minimoDespues = despues.minimo ?? null;
+    const maximoDespues = despues.maximo ?? null;
+
+    const cambioMinimo = minimoAntes !== minimoDespues;
+    const cambioMaximo = maximoAntes !== maximoDespues;
+
+    // No registrar si ninguno de los dos campos cambió.
+    if (!cambioMinimo && !cambioMaximo) {
+      return null;
+    }
+
+    const detalle = {};
+
+    if (cambioMinimo) {
+      detalle.minimo = {
+        antes: minimoAntes,
+        despues: minimoDespues,
+      };
+    }
+
+    if (cambioMaximo) {
+      detalle.maximo = {
+        antes: maximoAntes,
+        despues: maximoDespues,
+      };
+    }
+
+    await registrarAuditoria({
+      tipo: "umbral_modificado",
+      usuarioId: despues.actualizadoPor || "desconocido",
+      entidadAfectada: `umbrales/${context.params.id}`,
+      detalle,
+      id: context.eventId,
+    });
+
+    return null;
+  });
+
+/**
+ * Audita las transiciones de estado de las alertas.
+ */
+exports.auditarAlerta = functions.firestore
+  .document("alertas/{id}")
+  .onUpdate(async (change, context) => {
+    const antes = change.before.data();
+    const despues = change.after.data();
+
+    // Solo auditar transiciones hacia estos estados.
+    if (antes.estado === despues.estado) {
+      return null;
+    }
+
+    let tipo;
+    let usuarioId;
+
+    if (despues.estado === "reconocida") {
+      tipo = "alerta_reconocida";
+      usuarioId = despues.reconocidaPor || "desconocido";
+    } else if (despues.estado === "resuelta") {
+      tipo = "alerta_resuelta";
+      usuarioId = despues.resueltaPor || "desconocido";
+    } else {
+      return null;
+    }
+
+    await registrarAuditoria({
+      tipo,
+      usuarioId,
+      entidadAfectada: `alertas/${context.params.id}`,
+      detalle: {
+        estado: {
+          antes: antes.estado ?? null,
+          despues: despues.estado ?? null,
+        },
+      },
+      id: context.eventId,
+    });
+
+    return null;
+  });
+
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
+
+if (!admin.apps.length) {
+  admin.initializeApp();
+}
+
+const db = admin.firestore();
+
+/**
+ * Registra un evento de auditoría.
+ * Si recibe un batch, el evento se confirma junto con la operación.
+ */
+async function registrarEvento({
+  context,
+  tipoEvento,
+  entidadAfectada,
+  detalle,
+  batch = null,
+}) {
+  if (!context || !context.auth || !context.auth.uid) {
+    throw new functions.https.HttpsError(
+      "unauthenticated",
+      "Se requiere autenticación para auditar esta operación."
+    );
+  }
+
+  if (!tipoEvento || !entidadAfectada) {
+    throw new functions.https.HttpsError(
+      "invalid-argument",
+      "Faltan datos obligatorios para el evento de auditoría."
+    );
+  }
+
+  const eventoRef = db.collection("auditoria").doc();
+
+  const evento = {
+    usuarioId: context.auth.uid,
+    tipoEvento,
+    entidadAfectada,
+    detalle: detalle || {},
+    fecha: admin.firestore.FieldValue.serverTimestamp(),
+  };
+
+  if (batch) {
+    batch.set(eventoRef, evento);
+  } else {
+    await eventoRef.set(evento);
+  }
+
+  return eventoRef.id;
+}
