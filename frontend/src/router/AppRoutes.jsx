@@ -76,3 +76,4 @@ const AppRoutes = () => {
 };
 
 export default AppRoutes;
+import Configuracion from "../pages/configuracion/Configuracion";
